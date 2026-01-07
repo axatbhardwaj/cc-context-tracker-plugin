@@ -16,6 +16,8 @@ from core.session_analyzer import SessionAnalyzer
 from core.topic_detector import TopicDetector
 from core.path_classifier import PathClassifier
 from core.markdown_writer import MarkdownWriter
+from core.wiki_parser import WikiKnowledge, parse
+from core.wiki_merger import merge_session
 from core.git_sync import GitSync
 from core.config_loader import load_config
 from utils.file_utils import ensure_directory
@@ -123,16 +125,48 @@ def main():
         context_dir = context_root / classification / rel_path
         cleanup_old_topic_files(context_dir)
 
-        # Write all topics to single context.md entry
-        file_path = writer.append_session(
-            project_path=cwd,
-            classification=classification,
-            topics=all_topics,
-            changes=changes,
-            reasoning=reasoning,
-            context=session_context
-        )
-        logger.info(f"Updated {file_path}")
+        # Wiki flow: parse -> merge -> write
+        # Graceful fallback preserves data when wiki parse fails on corrupted/legacy files
+        wiki_enabled = config.get('wiki_config', {}).get('enabled', True)
+        file_path = None
+
+        if wiki_enabled:
+            try:
+                wiki_file = context_dir / "context.md"
+                if wiki_file.exists():
+                    wiki = parse(wiki_file.read_text())
+                    # Detect legacy session format: file exists but parse returns empty wiki
+                    # Check all 5 sections to avoid false positives
+                    is_empty = not any([
+                        wiki.architecture, wiki.decisions, wiki.patterns,
+                        wiki.issues, wiki.recent_work
+                    ])
+                    if is_empty:
+                        logger.info("Detected legacy session format, preserving history")
+                        wiki_enabled = False
+                else:
+                    wiki = WikiKnowledge()
+
+                if wiki_enabled:
+                    max_recent = config.get('wiki_config', {}).get('max_recent_sessions', 5)
+                    wiki = merge_session(wiki, session_context, max_recent)
+                    file_path = writer.write_wiki(wiki, context_dir)
+                    logger.info(f"Updated wiki: {file_path}")
+            except Exception as e:
+                logger.warning(f"Wiki update failed, falling back to session format: {e}")
+                wiki_enabled = False
+
+        # Fallback to session format if wiki disabled or failed
+        if not wiki_enabled or not file_path:
+            file_path = writer.append_session(
+                project_path=cwd,
+                classification=classification,
+                topics=all_topics,
+                changes=changes,
+                reasoning=reasoning,
+                context=session_context
+            )
+            logger.info(f"Updated session: {file_path}")
 
         # Copy plan files to context directory
         context_root = Path(config.get('context_root', '~/context')).expanduser()

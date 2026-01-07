@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from core.session_analyzer import FileChange, SessionContext
+from core.wiki_parser import WikiKnowledge
 from utils.file_utils import ensure_directory, prepend_to_file
 from utils.logger import get_logger
 
@@ -147,3 +148,60 @@ class MarkdownWriter:
         parts.append("\n---\n")
 
         return '\n'.join(parts)
+
+    def write_wiki(self, wiki: WikiKnowledge, context_dir: Path) -> Path:
+        """Write wiki knowledge base to context.md.
+
+        Section headers maintain exact format `## Section Name` for reliable
+        regex parsing. WikiKnowledge sections never None (empty lists) ensures
+        no null checks needed.
+
+        Args:
+            wiki: WikiKnowledge to write
+            context_dir: Context directory for project
+
+        Returns:
+            Path to written file
+        """
+        ensure_directory(context_dir)
+        wiki_file = context_dir / "context.md"
+
+        parts = ["# Project Context\n"]
+
+        # Architecture section (text block, not list)
+        parts.append("## Architecture\n")
+        if wiki.architecture:
+            parts.append(f"{wiki.architecture}\n")
+        else:
+            parts.append("_No architectural notes yet._\n")
+
+        # Decisions section (list)
+        parts.append("\n## Decisions\n")
+        if wiki.decisions:
+            parts.append('\n'.join(f"- {d}" for d in wiki.decisions) + '\n')
+        else:
+            parts.append("_No decisions recorded yet._\n")
+
+        # Patterns section (list)
+        parts.append("\n## Patterns\n")
+        if wiki.patterns:
+            parts.append('\n'.join(f"- {p}" for p in wiki.patterns) + '\n')
+        else:
+            parts.append("_No patterns identified yet._\n")
+
+        # Issues section (list)
+        parts.append("\n## Issues\n")
+        if wiki.issues:
+            parts.append('\n'.join(f"- {i}" for i in wiki.issues) + '\n')
+        else:
+            parts.append("_No issues tracked yet._\n")
+
+        # Recent Work section (list)
+        parts.append("\n## Recent Work\n")
+        if wiki.recent_work:
+            parts.append('\n'.join(f"- {w}" for w in wiki.recent_work) + '\n')
+        else:
+            parts.append("_No recent work yet._\n")
+
+        wiki_file.write_text('\n'.join(parts))
+        return wiki_file

@@ -38,5 +38,9 @@
     "use_for_reasoning": true,
     "use_for_topic_detection": true,
     "fallback_to_patterns": true
+  },
+  "wiki_config": {
+    "enabled": true,
+    "max_recent_sessions": 5
   }
 }
