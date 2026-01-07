@@ -5,11 +5,10 @@ Extracts file changes and reasoning from Claude Code sessions.
 """
 
 import json
-from typing import List, Dict, Any
-from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass, field
 from pathlib import Path
 
-# Import local modules
 from utils.llm_client import LLMClient
 from utils.logger import get_logger
 
@@ -24,6 +23,16 @@ class FileChange:
     description: str
     lines_added: int = 0
     lines_removed: int = 0
+
+
+@dataclass
+class SessionContext:
+    """Rich context extracted from a Claude Code session."""
+    user_goal: str = ""
+    summary: str = ""
+    decisions_made: List[str] = field(default_factory=list)
+    problems_solved: List[str] = field(default_factory=list)
+    future_work: List[str] = field(default_factory=list)
 
 
 class SessionAnalyzer:
@@ -186,7 +195,7 @@ class SessionAnalyzer:
         file_path: str,
         tool_input: Dict[str, Any]
     ) -> str:
-        """Generate brief description of change.
+        """Generate meaningful description of change.
 
         Args:
             tool_name: Name of the tool used
@@ -199,19 +208,84 @@ class SessionAnalyzer:
         file_name = Path(file_path).name
 
         if tool_name == 'Write':
-            return f"Created {file_name}"
-        elif tool_name == 'Edit':
-            old_text = tool_input.get('old_string', '')
-            # Extract first meaningful line for context
-            first_line = old_text.split('\n')[0][:50] if old_text else ''
-            if first_line:
-                return f"Updated {file_name} ({first_line}...)"
-            return f"Updated {file_name}"
-        elif tool_name == 'MultiEdit':
+            return self._describe_new_file(file_path, tool_input)
+
+        if tool_name == 'Edit':
+            return self._describe_edit(file_path, tool_input)
+
+        if tool_name == 'MultiEdit':
             edit_count = len(tool_input.get('edits', []))
-            return f"Updated {file_name} ({edit_count} edits)"
-        else:
-            return f"Modified {file_name}"
+            return f"Multiple updates ({edit_count} changes)"
+
+        return "Modified"
+
+    def _describe_new_file(self, file_path: str, tool_input: Dict[str, Any]) -> str:
+        """Describe a newly created file."""
+        content = tool_input.get('content', '')
+        file_name = Path(file_path).name
+        ext = Path(file_path).suffix
+
+        # Detect file type and purpose
+        if 'test' in file_path.lower() or file_name.startswith('test_'):
+            return "Added test file"
+        if file_name == 'conftest.py':
+            return "Added pytest fixtures"
+        if ext == '.md':
+            return "Added documentation"
+        if 'config' in file_name.lower():
+            return "Added configuration"
+
+        # Check content for clues
+        if 'class ' in content:
+            match = self._extract_pattern(content, r'class\s+(\w+)')
+            if match:
+                return f"Added {match} class"
+        if 'def ' in content:
+            match = self._extract_pattern(content, r'def\s+(\w+)')
+            if match:
+                return f"Added {match} function"
+
+        return "Created new file"
+
+    def _describe_edit(self, file_path: str, tool_input: Dict[str, Any]) -> str:
+        """Describe an edit to existing file."""
+        old_text = tool_input.get('old_string', '')
+        new_text = tool_input.get('new_string', '')
+
+        if not old_text or not new_text:
+            return "Updated file"
+
+        # Check for common patterns
+        if 'def ' in new_text and 'def ' not in old_text:
+            match = self._extract_pattern(new_text, r'def\s+(\w+)')
+            if match:
+                return f"Added {match} function"
+
+        if 'class ' in new_text and 'class ' not in old_text:
+            match = self._extract_pattern(new_text, r'class\s+(\w+)')
+            if match:
+                return f"Added {match} class"
+
+        if 'import ' in new_text and 'import ' not in old_text:
+            return "Added imports"
+
+        if len(new_text) > len(old_text) * 1.5:
+            return "Extended functionality"
+
+        if len(new_text) < len(old_text) * 0.7:
+            return "Simplified code"
+
+        # Check for fix patterns
+        if 'fix' in new_text.lower() or 'bug' in new_text.lower():
+            return "Fixed bug"
+
+        return "Updated logic"
+
+    def _extract_pattern(self, text: str, pattern: str) -> str:
+        """Extract first match from text using regex."""
+        import re
+        match = re.search(pattern, text)
+        return match.group(1) if match else ""
 
     def extract_reasoning(self, changes: List[FileChange]) -> str:
         """Extract reasoning for changes using LLM.
@@ -299,3 +373,119 @@ Respond with reasoning only (no code, no implementation details):"""
             parts.append(f"deleted {action_counts['deleted']} file(s)")
 
         return f"Session involved {', '.join(parts)} in the project."
+
+    def extract_session_context(self, changes: List[FileChange]) -> SessionContext:
+        """Extract rich session context using LLM analysis.
+
+        Args:
+            changes: List of FileChange objects
+
+        Returns:
+            SessionContext with goal, summary, decisions, problems, future work
+        """
+        transcript_content = self._get_full_transcript()
+        if not transcript_content:
+            return self._fallback_context(changes)
+
+        change_summary = '\n'.join([
+            f"- {c.action}: {c.file_path}" for c in changes[:15]
+        ])
+
+        prompt = f"""Analyze this Claude Code session transcript and extract:
+
+1. USER_GOAL: What was the user trying to accomplish? (1 sentence)
+2. SUMMARY: What was done in this session? (1-2 sentences)
+3. DECISIONS: Key technical decisions made (list up to 3, or "None")
+4. PROBLEMS_SOLVED: Issues or bugs fixed (list up to 3, or "None")
+5. FUTURE_WORK: Remaining tasks or TODOs mentioned (list up to 3, or "None")
+
+Files changed:
+{change_summary}
+
+Session transcript (last 8000 chars):
+{transcript_content[-8000:]}
+
+Respond in this exact format:
+USER_GOAL: <goal>
+SUMMARY: <summary>
+DECISIONS:
+- <decision 1>
+- <decision 2>
+PROBLEMS_SOLVED:
+- <problem 1>
+FUTURE_WORK:
+- <todo 1>"""
+
+        try:
+            response = self.llm_client.generate(prompt, max_tokens=600)
+            return self._parse_context_response(response)
+        except Exception as e:
+            logger.warning(f"Failed to extract session context: {e}")
+            return self._fallback_context(changes)
+
+    def _get_full_transcript(self) -> str:
+        """Get full transcript content for analysis."""
+        transcript_path = self.input_data.get('transcript_path')
+        if not transcript_path or not Path(transcript_path).exists():
+            return ""
+
+        try:
+            with open(transcript_path, 'r') as f:
+                return f.read()
+        except (IOError, OSError):
+            return ""
+
+    def _parse_context_response(self, response: str) -> SessionContext:
+        """Parse LLM response into SessionContext."""
+        ctx = SessionContext()
+
+        lines = response.strip().split('\n')
+        current_section = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith('USER_GOAL:'):
+                ctx.user_goal = line.replace('USER_GOAL:', '').strip()
+            elif line.startswith('SUMMARY:'):
+                ctx.summary = line.replace('SUMMARY:', '').strip()
+            elif line.startswith('DECISIONS:'):
+                current_section = 'decisions'
+            elif line.startswith('PROBLEMS_SOLVED:'):
+                current_section = 'problems'
+            elif line.startswith('FUTURE_WORK:'):
+                current_section = 'future'
+            elif line.startswith('- ') and current_section:
+                item = line[2:].strip()
+                if item.lower() == 'none':
+                    continue
+                if current_section == 'decisions':
+                    ctx.decisions_made.append(item)
+                elif current_section == 'problems':
+                    ctx.problems_solved.append(item)
+                elif current_section == 'future':
+                    ctx.future_work.append(item)
+
+        return ctx
+
+    def _fallback_context(self, changes: List[FileChange]) -> SessionContext:
+        """Generate fallback context without LLM."""
+        file_types = set()
+        for c in changes:
+            ext = Path(c.file_path).suffix
+            if ext:
+                file_types.add(ext)
+
+        summary = f"Modified {len(changes)} file(s)"
+        if file_types:
+            summary += f" ({', '.join(sorted(file_types))})"
+
+        return SessionContext(
+            user_goal="",
+            summary=summary,
+            decisions_made=[],
+            problems_solved=[],
+            future_work=[]
+        )
