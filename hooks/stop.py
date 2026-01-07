@@ -4,6 +4,7 @@
 import os
 import sys
 import json
+import shutil
 from pathlib import Path
 
 # Add plugin root to path
@@ -17,9 +18,26 @@ from core.path_classifier import PathClassifier
 from core.markdown_writer import MarkdownWriter
 from core.git_sync import GitSync
 from core.config_loader import load_config
+from utils.file_utils import ensure_directory
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def copy_plan_files(changes, context_dir: Path):
+    """Copy plan files to context directory."""
+    plans_dir = context_dir / 'plans'
+
+    for change in changes:
+        file_path = Path(change.file_path)
+
+        # Check if it's a plan file
+        if '.claude/plans/' in str(file_path) or '/plans/' in str(file_path):
+            if file_path.exists() and file_path.suffix == '.md':
+                ensure_directory(plans_dir)
+                dest = plans_dir / file_path.name
+                shutil.copy2(file_path, dest)
+                logger.info(f"Copied plan file: {file_path.name}")
 
 
 def main():
@@ -79,6 +97,12 @@ def main():
             )
             written_files.append(file_path)
             logger.info(f"Updated {file_path}")
+
+        # Copy plan files to context directory
+        context_root = Path(config.get('context_root', '~/context')).expanduser()
+        rel_path = cwd.replace(str(Path.home()), '').lstrip('/')
+        context_dir = context_root / classification / rel_path
+        copy_plan_files(changes, context_dir)
 
         # Git sync
         git = GitSync(config.get('context_root', '~/context'), config)
