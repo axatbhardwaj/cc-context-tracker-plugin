@@ -3,9 +3,9 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from core.session_analyzer import FileChange
+from core.session_analyzer import FileChange, SessionContext
 from utils.file_utils import ensure_directory, prepend_to_file
 from utils.logger import get_logger
 
@@ -30,7 +30,8 @@ class MarkdownWriter:
         classification: str,
         topic: str,
         changes: List[FileChange],
-        reasoning: str
+        reasoning: str,
+        context: Optional[SessionContext] = None
     ) -> Path:
         """Append session entry to topic file.
 
@@ -39,30 +40,25 @@ class MarkdownWriter:
             classification: 'work' or 'personal'
             topic: Topic name
             changes: List of FileChange objects
-            reasoning: Reasoning string
+            reasoning: Reasoning string (fallback if no context)
+            context: Rich session context from LLM
 
         Returns:
             Path to written file
         """
-        # Determine context directory
         rel_path = self._get_relative_path(project_path)
         context_dir = self.context_root / classification / rel_path
 
-        # Ensure directory exists
         ensure_directory(context_dir)
 
-        # Format session entry
-        entry = self._format_session_entry(topic, changes, reasoning)
+        entry = self._format_session_entry(topic, changes, reasoning, context)
 
-        # Prepend to topic file (newest first)
         topic_file = context_dir / f"{topic}.md"
 
         if not topic_file.exists():
-            # Create new file with header
             header = f"# {topic.replace('-', ' ').title()}\n\n"
             topic_file.write_text(header + entry)
         else:
-            # Prepend to existing file
             prepend_to_file(topic_file, entry)
 
         return topic_file
@@ -85,14 +81,16 @@ class MarkdownWriter:
         self,
         topic: str,
         changes: List[FileChange],
-        reasoning: str
+        reasoning: str,
+        context: Optional[SessionContext] = None
     ) -> str:
         """Format session entry as markdown.
 
         Args:
             topic: Topic name
             changes: List of FileChange objects
-            reasoning: Reasoning string
+            reasoning: Reasoning string (fallback)
+            context: Rich session context
 
         Returns:
             Formatted markdown string
@@ -101,26 +99,43 @@ class MarkdownWriter:
         date_str = now.strftime('%Y-%m-%d')
         time_str = now.strftime('%H:%M')
 
-        # Format changes
+        parts = [f"## Session: {date_str} {time_str}"]
+
+        # Goal section
+        if context and context.user_goal:
+            parts.append(f"\n### Goal\n{context.user_goal}")
+
+        # Summary section
+        if context and context.summary:
+            parts.append(f"\n### Summary\n{context.summary}")
+        elif reasoning:
+            parts.append(f"\n### Summary\n{reasoning}")
+
+        # Changes section
         change_lines = []
         for change in changes:
+            file_name = Path(change.file_path).name
             change_lines.append(
-                f"- {change.action.capitalize()} `{change.file_path}`: "
-                f"{change.description}"
+                f"- **{change.action.capitalize()}** `{file_name}`: {change.description}"
             )
+        if change_lines:
+            parts.append(f"\n### Changes\n" + '\n'.join(change_lines))
 
-        changes_md = '\n'.join(change_lines)
+        # Decisions section
+        if context and context.decisions_made:
+            decisions = '\n'.join(f"- {d}" for d in context.decisions_made)
+            parts.append(f"\n### Decisions\n{decisions}")
 
-        # Build entry
-        entry = f"""## Session: {date_str} {time_str}
+        # Problems solved section
+        if context and context.problems_solved:
+            problems = '\n'.join(f"- {p}" for p in context.problems_solved)
+            parts.append(f"\n### Problems Solved\n{problems}")
 
-### Changes
-{changes_md}
+        # Future work section
+        if context and context.future_work:
+            todos = '\n'.join(f"- [ ] {t}" for t in context.future_work)
+            parts.append(f"\n### Future Work\n{todos}")
 
-### Reasoning
-{reasoning}
+        parts.append("\n---\n")
 
----
-
-"""
-        return entry
+        return '\n'.join(parts)
