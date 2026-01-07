@@ -73,14 +73,74 @@ def cleanup_old_topic_files(context_dir: Path):
     marker_file.touch()
 
 
+def extract_cwd_from_transcript(transcript_path: str) -> str:
+    """Extract cwd from transcript path.
+
+    Claude Code stores transcripts in ~/.claude/projects/-home-xzat-project/session.jsonl
+    The directory name encodes the path with leading dash and dashes as separators.
+    Since dashes in directory names are ambiguous, we try different interpretations.
+    """
+    if not transcript_path:
+        return ''
+
+    path = Path(transcript_path).expanduser()
+    project_dir = path.parent.name
+
+    if not project_dir.startswith('-'):
+        return ''
+
+    # Remove leading dash and split by dash
+    parts = project_dir[1:].split('-')
+
+    # Use dynamic programming to find valid path
+    return _find_valid_path_dp(parts)
+
+
+def _find_valid_path_dp(parts: list) -> str:
+    """Find valid path using dynamic programming to try all groupings."""
+    n = len(parts)
+    if n == 0:
+        return ''
+
+    # memo[i] = valid path string for parts[0:i], or None if not found
+    memo = [None] * (n + 1)
+    memo[0] = ''
+
+    for end in range(1, n + 1):
+        # Try all possible last segments
+        for start in range(end):
+            if memo[start] is None:
+                continue
+
+            # Form segment from parts[start:end] joined with dashes
+            segment = '-'.join(parts[start:end])
+            candidate = memo[start] + '/' + segment
+
+            if Path(candidate).exists():
+                memo[end] = candidate
+                break  # Take first valid path found
+
+    return memo[n] if memo[n] else '/' + '/'.join(parts)
+
+
 def main():
     """Main entry point for Stop hook."""
     try:
         # Read hook input
         input_data = json.load(sys.stdin)
 
-        cwd = input_data.get('cwd', '')
+        # Debug: write input to file for inspection
+        debug_file = Path('/tmp/claude-hook-debug.json')
+        debug_file.write_text(json.dumps(input_data, indent=2))
+        logger.info(f"Hook input keys: {list(input_data.keys())}")
+
+        # Stop hooks don't receive cwd - extract from transcript_path
+        transcript_path = input_data.get('transcript_path', '')
+        cwd = input_data.get('cwd') or extract_cwd_from_transcript(transcript_path)
         session_id = input_data.get('session_id', '')
+
+        logger.info(f"transcript_path: {transcript_path}")
+        logger.info(f"Extracted cwd: {cwd}")
 
         # Load configuration
         config = load_config()
@@ -94,6 +154,9 @@ def main():
         # Analyze session for changes
         analyzer = SessionAnalyzer(input_data, config)
         changes = analyzer.get_changes()
+        logger.info(f"Found {len(changes)} file changes")
+        for c in changes[:5]:
+            logger.info(f"  - {c.action}: {c.file_path}")
 
         # Skip if no meaningful changes
         min_threshold = config.get('session_config', {}).get('min_changes_threshold', 1)
@@ -121,7 +184,7 @@ def main():
 
         # One-time cleanup of legacy topic files
         context_root = Path(config.get('context_root', '~/context')).expanduser()
-        rel_path = cwd.replace(str(Path.home()), '').lstrip('/')
+        rel_path = PathClassifier.get_relative_path(cwd, classification, config)
         context_dir = context_root / classification / rel_path
         cleanup_old_topic_files(context_dir)
 
@@ -168,10 +231,7 @@ def main():
             )
             logger.info(f"Updated session: {file_path}")
 
-        # Copy plan files to context directory
-        context_root = Path(config.get('context_root', '~/context')).expanduser()
-        rel_path = cwd.replace(str(Path.home()), '').lstrip('/')
-        context_dir = context_root / classification / rel_path
+        # Copy plan files to context directory (context_dir already calculated above)
         copy_plan_files(changes, context_dir)
 
         # Git sync
