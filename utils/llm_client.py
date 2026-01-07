@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 class LLMClient:
-    """LLM client using Claude Code CLI."""
+    """LLM client using Claude Code CLI with Sonnet model."""
 
     def __init__(self, config: Dict[str, Any]):
         """Initialize LLM client.
@@ -23,15 +23,16 @@ class LLMClient:
             config: LLM configuration
         """
         self.config = config
-        self.max_tokens = config.get('max_tokens', 500)
+        self.model = config.get('model', 'sonnet')
+        self.max_tokens = config.get('max_tokens', 10000)
         self._claude_path = shutil.which('claude')
 
     def generate(self, prompt: str, max_tokens: int = None) -> str:
-        """Generate text using Claude Code CLI.
+        """Generate text using Claude Code CLI with Sonnet.
 
         Args:
             prompt: Input prompt
-            max_tokens: Maximum tokens to generate (not used with CLI)
+            max_tokens: Maximum tokens (not directly used by CLI)
 
         Returns:
             Generated text
@@ -41,11 +42,18 @@ class LLMClient:
             return self._fallback_response(prompt)
 
         try:
+            cmd = [
+                self._claude_path,
+                '-p', prompt,
+                '--model', self.model,
+                '--no-input'
+            ]
+
             result = subprocess.run(
-                [self._claude_path, '-p', prompt, '--no-input'],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=120  # Increased timeout for Sonnet
             )
 
             if result.returncode != 0:
@@ -55,7 +63,7 @@ class LLMClient:
             return result.stdout.strip()
 
         except subprocess.TimeoutExpired:
-            logger.error("claude CLI timed out")
+            logger.error("claude CLI timed out (120s)")
             return self._fallback_response(prompt)
         except Exception as e:
             logger.error(f"claude CLI error: {e}")
