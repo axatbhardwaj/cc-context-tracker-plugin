@@ -374,11 +374,12 @@ Respond with reasoning only (no code, no implementation details):"""
 
         return f"Session involved {', '.join(parts)} in the project."
 
-    def extract_session_context(self, changes: List[FileChange]) -> SessionContext:
+    def extract_session_context(self, changes: List[FileChange], topics: List[str] = None) -> SessionContext:
         """Extract rich session context using LLM analysis.
 
         Args:
             changes: List of FileChange objects
+            topics: List of detected topic names for inline tagging
 
         Returns:
             SessionContext with goal, summary, decisions, problems, future work
@@ -387,14 +388,22 @@ Respond with reasoning only (no code, no implementation details):"""
         if not transcript_content:
             return self._fallback_context(changes)
 
+        # Topics passed to LLM for inline tagging (consolidation approach)
+        if not topics:
+            topics = ['general-changes']
+        topic_tags = ', '.join(f'[{t}]' for t in topics)
+
         change_summary = '\n'.join([
             f"- {c.action}: {c.file_path}" for c in changes[:15]
         ])
 
-        prompt = f"""Analyze this Claude Code session transcript and extract:
+        # Prompt requests single summary with inline topic tags for all detected topics
+        prompt = f"""Analyze this Claude Code session transcript and extract a consolidated summary.
+
+Detected topics: {topic_tags}
 
 1. USER_GOAL: What was the user trying to accomplish? (1 sentence)
-2. SUMMARY: What was done in this session? (1-2 sentences)
+2. SUMMARY: What was done in this session? Include topic tags {topic_tags} inline. (2-3 sentences)
 3. DECISIONS: Key technical decisions made (list up to 3, or "None")
 4. PROBLEMS_SOLVED: Issues or bugs fixed (list up to 3, or "None")
 5. FUTURE_WORK: Remaining tasks or TODOs mentioned (list up to 3, or "None")
@@ -402,8 +411,8 @@ Respond with reasoning only (no code, no implementation details):"""
 Files changed:
 {change_summary}
 
-Session transcript (last 20000 chars):
-{transcript_content[-20000:]}
+Session transcript:
+{transcript_content}
 
 Respond in this exact format:
 USER_GOAL: <goal>
@@ -417,7 +426,8 @@ FUTURE_WORK:
 - <todo 1>"""
 
         try:
-            response = self.llm_client.generate(prompt, max_tokens=600)
+            # 2k tokens sufficient for goal(200) + summary(400) + decisions(400) + problems(400) + future(400) + tags(200)
+            response = self.llm_client.generate(prompt, max_tokens=2000)
             return self._parse_context_response(response)
         except Exception as e:
             logger.warning(f"Failed to extract session context: {e}")
