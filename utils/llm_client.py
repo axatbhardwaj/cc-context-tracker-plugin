@@ -29,7 +29,7 @@ class LLMClient:
         self.max_tokens = config.get('max_tokens', 20000)
 
         self._claude_path = shutil.which('claude')
-        self._gemini_path = shutil.which("gemini") or "/home/xzat/.bun/bin/gemini"
+        self._gemini_path = shutil.which("gemini")
 
     def generate(self, prompt: str, max_tokens: int = None) -> str:
         """Generate text using configured provider.
@@ -84,15 +84,9 @@ class LLMClient:
 
     def _generate_gemini(self, prompt: str) -> str:
         """Generate using Gemini CLI."""
-        if (
-            not self._gemini_path
-            or not shutil.which("gemini")
-            and not Path(self._gemini_path).exists()
-        ):
-            # Fallback check if it's not in PATH but manually set
-            if not Path(self._gemini_path).exists():
-                logger.warning("gemini CLI not found")
-                return self._fallback_response(prompt)
+        if not self._gemini_path:
+            logger.warning("gemini CLI not found in PATH")
+            return self._fallback_response(prompt)
 
         try:
             # Gemini CLI takes prompt via stdin or arg
@@ -112,6 +106,9 @@ class LLMClient:
             # Clean up potential "Gemini:" prefix or similar if any (usually raw output)
             return result.stdout.strip()
 
+        except subprocess.TimeoutExpired:
+            logger.error("gemini CLI timed out (120s)")
+            return self._fallback_response(prompt)
         except Exception as e:
             logger.error(f"gemini CLI error: {e}")
             return self._fallback_response(prompt)

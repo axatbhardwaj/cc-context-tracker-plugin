@@ -217,8 +217,7 @@ class MarkdownWriter:
         """Write immutable session log to history directory.
 
         Args:
-            project_path: Full path to project
-            classification: 'work' or 'personal'
+            context_dir: Directory containing context.md
             topics: List of topics
             changes: List of changes
             reasoning: Reasoning

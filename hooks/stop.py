@@ -209,7 +209,7 @@ Then output a JSON summary."""
         # if the user hasn't set it, OR rely on LLMClient default.
         # For now, we trust the config passed in.
         llm = LLMClient(config)
-        response = llm.generate(prompt, max_tokens=2000000)  # Gemini has large context
+        response = llm.generate(prompt)  # Gemini has large context
 
         # Extract context.md content from response
         context_match = re.search(
