@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import shutil
+import re
 from pathlib import Path
 
 # Add plugin root to path
@@ -15,9 +16,6 @@ if PLUGIN_ROOT and PLUGIN_ROOT not in sys.path:
 from core.session_analyzer import SessionAnalyzer
 from core.topic_detector import TopicDetector
 from core.path_classifier import PathClassifier
-from core.markdown_writer import MarkdownWriter
-from core.wiki_parser import WikiKnowledge, parse
-from core.wiki_merger import merge_session
 from core.git_sync import GitSync
 from core.config_loader import load_config
 from utils.file_utils import ensure_directory
@@ -123,6 +121,116 @@ def _find_valid_path_dp(parts: list) -> str:
     return memo[n] if memo[n] else '/' + '/'.join(parts)
 
 
+def load_skill_prompt(skill_name: str) -> str:
+    """Load skill prompt from SKILL.md file.
+
+    Args:
+        skill_name: Name of skill directory
+
+    Returns:
+        Skill prompt content (without frontmatter)
+    """
+    skill_file = Path(PLUGIN_ROOT) / 'skills' / skill_name / 'SKILL.md'
+
+    if not skill_file.exists():
+        return ""
+
+    content = skill_file.read_text()
+
+    # Skip YAML frontmatter
+    if content.startswith('---'):
+        end_idx = content.find('---', 3)
+        if end_idx != -1:
+            content = content[end_idx + 3:].strip()
+
+    return content
+
+
+def analyze_with_skill(
+    transcript_path: str,
+    context_path: str,
+    topics: list,
+    config: dict
+) -> dict:
+    """Analyze session using skill-based prompt via LLM client.
+
+    Args:
+        transcript_path: Path to session transcript
+        context_path: Path to context.md file
+        topics: List of detected topics
+        config: Plugin configuration
+
+    Returns:
+        Dict with analysis result
+    """
+    from utils.llm_client import LLMClient
+
+    skill_prompt = load_skill_prompt('analyze-session')
+    if not skill_prompt:
+        return {"status": "error", "error": "Skill not found"}
+
+    # Read transcript (truncated for prompt limits)
+    transcript_content = ""
+    if Path(transcript_path).exists():
+        with open(transcript_path) as f:
+            content = f.read()
+            # Take last 50k chars for context
+            transcript_content = content[-50000:] if len(content) > 50000 else content
+
+    # Read existing context.md
+    existing_context = ""
+    if Path(context_path).exists():
+        existing_context = Path(context_path).read_text()
+
+    topics_str = ','.join(topics) if topics else 'general-changes'
+
+    # Build prompt with skill instructions and data
+    prompt = f"""{skill_prompt}
+
+## Current Task
+
+Analyze this session and update the context wiki.
+
+Arguments:
+- topics: {topics_str}
+
+### Existing context.md:
+```markdown
+{existing_context if existing_context else '(new file - create from scratch)'}
+```
+
+### Session transcript (most recent portion):
+```
+{transcript_content}
+```
+
+Output the complete updated context.md content between <context_md> tags.
+Then output a JSON summary."""
+
+    try:
+        llm = LLMClient(config)
+        response = llm.generate(prompt, max_tokens=4000)
+
+        # Extract context.md content from response
+        context_match = re.search(
+            r'<context_md>(.*?)</context_md>',
+            response,
+            re.DOTALL
+        )
+
+        if context_match:
+            new_content = context_match.group(1).strip()
+            Path(context_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(context_path).write_text(new_content)
+            return {"status": "success", "context_path": context_path}
+
+        return {"status": "error", "error": "No context_md tags in response"}
+
+    except Exception as e:
+        logger.warning(f"Skill analysis failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+
 def main():
     """Main entry point for Stop hook."""
     try:
@@ -137,7 +245,6 @@ def main():
         # Stop hooks don't receive cwd - extract from transcript_path
         transcript_path = input_data.get('transcript_path', '')
         cwd = input_data.get('cwd') or extract_cwd_from_transcript(transcript_path)
-        session_id = input_data.get('session_id', '')
 
         logger.info(f"transcript_path: {transcript_path}")
         logger.info(f"Extracted cwd: {cwd}")
@@ -151,7 +258,7 @@ def main():
             print(json.dumps({}), file=sys.stdout)
             sys.exit(0)
 
-        # Analyze session for changes
+        # Analyze session for changes (lightweight - just file paths)
         analyzer = SessionAnalyzer(input_data, config)
         changes = analyzer.get_changes()
         logger.info(f"Found {len(changes)} file changes")
@@ -165,81 +272,43 @@ def main():
             print(json.dumps({}), file=sys.stdout)
             sys.exit(0)
 
-        # Classify project path
+        # Classify project path and build context path
         classification = PathClassifier.classify(cwd, config)
+        context_root = Path(config.get('context_root', '~/context')).expanduser()
+        rel_path = PathClassifier.get_relative_path(cwd, classification, config)
+        context_dir = context_root / classification / rel_path
+        context_path = context_dir / "context.md"
+
+        # Ensure context directory exists
+        ensure_directory(context_dir)
+
+        # One-time cleanup of legacy topic files
+        cleanup_old_topic_files(context_dir)
 
         # Detect topics from changes
         detector = TopicDetector(config)
         topics_map = detector.detect_topics(changes)
-
-        # Pass topics to LLM for inline tagging in consolidated summary
         all_topics = list(topics_map.keys())
-        session_context = analyzer.extract_session_context(changes, topics=all_topics)
 
-        # Fallback reasoning if context extraction failed
-        reasoning = session_context.summary or analyzer.extract_reasoning(changes)
+        # Use skill-based analysis to update context.md
+        logger.info("Analyzing session with skill...")
+        skill_result = analyze_with_skill(
+            transcript_path, str(context_path), all_topics, config
+        )
 
-        # Write to context files
-        writer = MarkdownWriter(config)
+        if skill_result.get('status') == 'error':
+            logger.warning(f"Skill analysis failed: {skill_result.get('error')}")
+        else:
+            logger.info(f"Updated context: {skill_result.get('context_path')}")
 
-        # One-time cleanup of legacy topic files
-        context_root = Path(config.get('context_root', '~/context')).expanduser()
-        rel_path = PathClassifier.get_relative_path(cwd, classification, config)
-        context_dir = context_root / classification / rel_path
-        cleanup_old_topic_files(context_dir)
-
-        # Wiki flow: parse -> merge -> write
-        # Graceful fallback preserves data when wiki parse fails on corrupted/legacy files
-        wiki_enabled = config.get('wiki_config', {}).get('enabled', True)
-        file_path = None
-
-        if wiki_enabled:
-            try:
-                wiki_file = context_dir / "context.md"
-                if wiki_file.exists():
-                    wiki = parse(wiki_file.read_text())
-                    # Detect legacy session format: file exists but parse returns empty wiki
-                    # Check all 5 sections to avoid false positives
-                    is_empty = not any([
-                        wiki.architecture, wiki.decisions, wiki.patterns,
-                        wiki.issues, wiki.recent_work
-                    ])
-                    if is_empty:
-                        logger.info("Detected legacy session format, preserving history")
-                        wiki_enabled = False
-                else:
-                    wiki = WikiKnowledge()
-
-                if wiki_enabled:
-                    max_recent = config.get('wiki_config', {}).get('max_recent_sessions', 5)
-                    wiki = merge_session(wiki, session_context, max_recent)
-                    file_path = writer.write_wiki(wiki, context_dir)
-                    logger.info(f"Updated wiki: {file_path}")
-            except Exception as e:
-                logger.warning(f"Wiki update failed, falling back to session format: {e}")
-                wiki_enabled = False
-
-        # Fallback to session format if wiki disabled or failed
-        if not wiki_enabled or not file_path:
-            file_path = writer.append_session(
-                project_path=cwd,
-                classification=classification,
-                topics=all_topics,
-                changes=changes,
-                reasoning=reasoning,
-                context=session_context
-            )
-            logger.info(f"Updated session: {file_path}")
-
-        # Copy plan files to context directory (context_dir already calculated above)
+        # Copy plan files to context directory
         copy_plan_files(changes, context_dir)
 
         # Git sync
         git = GitSync(config.get('context_root', '~/context'), config)
         project_name = Path(cwd).name
-        topics_list = list(topics_map.keys())
 
-        if git.commit_and_push(project_name, topics_list):
+        if git.commit_and_push(project_name, all_topics):
             logger.info("Changes committed and pushed to git")
 
         # Success
