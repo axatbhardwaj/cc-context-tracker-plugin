@@ -28,7 +28,7 @@ class MarkdownWriter:
         self,
         project_path: str,
         classification: str,
-        topic: str,
+        topics: List[str],
         changes: List[FileChange],
         reasoning: str,
         context: Optional[SessionContext] = None
@@ -38,7 +38,7 @@ class MarkdownWriter:
         Args:
             project_path: Full path to project
             classification: 'work' or 'personal'
-            topic: Topic name
+            topics: List of topic names
             changes: List of FileChange objects
             reasoning: Reasoning string (fallback if no context)
             context: Rich session context from LLM
@@ -51,12 +51,17 @@ class MarkdownWriter:
 
         ensure_directory(context_dir)
 
-        entry = self._format_session_entry(topic, changes, reasoning, context)
+        # Fallback maintains consistency when topic detection fails
+        if not topics:
+            topics = ["general-changes"]
 
-        topic_file = context_dir / f"{topic}.md"
+        entry = self._format_session_entry(topics, changes, reasoning, context)
+
+        # All sessions for this project append to context.md
+        topic_file = context_dir / "context.md"
 
         if not topic_file.exists():
-            header = f"# {topic.replace('-', ' ').title()}\n\n"
+            header = "# Project Context\n\n"
             topic_file.write_text(header + entry)
         else:
             prepend_to_file(topic_file, entry)
@@ -79,7 +84,7 @@ class MarkdownWriter:
 
     def _format_session_entry(
         self,
-        topic: str,
+        topics: List[str],
         changes: List[FileChange],
         reasoning: str,
         context: Optional[SessionContext] = None
@@ -87,7 +92,7 @@ class MarkdownWriter:
         """Format session entry as markdown.
 
         Args:
-            topic: Topic name
+            topics: List of topic names
             changes: List of FileChange objects
             reasoning: Reasoning string (fallback)
             context: Rich session context
@@ -99,7 +104,10 @@ class MarkdownWriter:
         date_str = now.strftime('%Y-%m-%d')
         time_str = now.strftime('%H:%M')
 
-        parts = [f"## Session: {date_str} {time_str}"]
+        # Topic tags enable filtering while keeping all sessions in single file
+        topic_tags = ' '.join(f"[{t}]" for t in topics)
+
+        parts = [f"## Session {topic_tags} - {date_str} {time_str}"]
 
         # Goal section
         if context and context.user_goal:
