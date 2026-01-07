@@ -52,22 +52,42 @@ class PathClassifier:
         return False
 
     @staticmethod
-    def get_relative_path(cwd: str, classification: str) -> str:
+    def get_relative_path(cwd: str, classification: str, config: Dict[str, Any]) -> str:
         """Extract relative path from cwd for context directory.
+
+        Strips the classification prefix to avoid double nesting like
+        ~/context/personal/personal/project.
 
         Args:
             cwd: Current working directory
             classification: 'work' or 'personal'
+            config: Plugin configuration
 
         Returns:
-            Relative path (e.g., 'valory/autonolas-subgraph')
+            Relative path (e.g., 'claude-context-tracker' not 'personal/claude-context-tracker')
         """
-        # Remove home directory prefix
+        # Get matching pattern for classification
+        if classification == 'work':
+            patterns = config.get('work_path_patterns', [])
+        else:
+            patterns = config.get('personal_path_patterns', [])
+
+        # Expand and find matching pattern
+        for pattern in patterns:
+            expanded = str(Path(pattern).expanduser())
+            if cwd.startswith(expanded):
+                # Return path after the pattern
+                return cwd[len(expanded):].lstrip('/')
+
+        # Fallback: remove home and classification from path
         home = str(Path.home())
         if cwd.startswith(home):
             rel_path = cwd[len(home):].lstrip('/')
+            # Strip classification prefix if present
+            if rel_path.startswith(classification + '/'):
+                rel_path = rel_path[len(classification) + 1:]
             return rel_path
 
-        # Fallback: use last 2 segments
+        # Last resort: use last 2 segments
         parts = Path(cwd).parts
         return '/'.join(parts[-2:]) if len(parts) >= 2 else parts[-1]
