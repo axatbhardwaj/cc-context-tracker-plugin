@@ -45,15 +45,16 @@ class LLMClient:
             cmd = [
                 self._claude_path,
                 '--print',
-                '--model', self.model,
-                prompt
+                '--model', self.model
             ]
 
+            # Pass prompt via stdin to avoid shell argument length limits
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
-                timeout=120  # Increased timeout for Sonnet
+                timeout=120
             )
 
             if result.returncode != 0:
