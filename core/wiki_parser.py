@@ -23,6 +23,7 @@ class WikiKnowledge:
     architecture: str = ""
     decisions: List[str] = field(default_factory=list)
     patterns: List[str] = field(default_factory=list)
+    key_symbols: List[str] = field(default_factory=list)
     issues: List[str] = field(default_factory=list)
     recent_work: List[str] = field(default_factory=list)
 
@@ -55,6 +56,7 @@ def parse(content: str) -> WikiKnowledge:
         # Extract list sections
         wiki.decisions = _extract_list_items(content, 'Decisions')
         wiki.patterns = _extract_list_items(content, 'Patterns')
+        wiki.key_symbols = _extract_list_items(content, 'Key Symbols')
         wiki.issues = _extract_list_items(content, 'Issues')
         wiki.recent_work = _extract_list_items(content, 'Recent Work')
 
@@ -91,3 +93,27 @@ def _extract_list_items(content: str, section_name: str) -> List[str]:
     items = re.findall(r'^[\-\*]\s+(.+)$', section_content, re.MULTILINE)
 
     return [item.strip() for item in items]
+
+
+def has_empty_sections(wiki: WikiKnowledge) -> bool:
+    """Check if wiki has empty Architecture, Patterns, or Key Symbols sections.
+
+    Returns True when any enrichable section contains only placeholder text
+    or is empty. Enables short-circuit enrichment: skip LLM calls if all
+    sections are already user-populated.
+
+    Args:
+        wiki: WikiKnowledge instance to check
+
+    Returns:
+        True if any of Architecture, Patterns, or Key Symbols is empty
+    """
+    placeholder_pattern = r'_No .* yet\._'
+
+    if not wiki.architecture or re.search(placeholder_pattern, wiki.architecture):
+        return True
+
+    if not wiki.patterns or not getattr(wiki, 'key_symbols', None):
+        return True
+
+    return False
