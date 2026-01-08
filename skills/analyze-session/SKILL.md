@@ -56,6 +56,54 @@ The wiki has 5 sections. Merge new content appropriately:
 ## Issues
 [Append problems solved. These become resolved issues for reference.]
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## Recent Work
 [Prepend new session summary. Keep last 5 entries. Oldest rotates out.]
 [Add link to the detailed session log using the `log_file` argument.]
