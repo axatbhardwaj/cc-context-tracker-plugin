@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import shutil
+import subprocess
 import re
 from pathlib import Path
 
@@ -16,6 +17,7 @@ if PLUGIN_ROOT and PLUGIN_ROOT not in sys.path:
 from core.session_analyzer import SessionAnalyzer
 from core.markdown_writer import MarkdownWriter
 from core.topic_detector import TopicDetector
+from core.wiki_parser import parse, has_empty_sections
 from core.path_classifier import PathClassifier
 from core.git_sync import GitSync
 from core.config_loader import load_config
@@ -23,6 +25,63 @@ from utils.file_utils import ensure_directory
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def analyze_codebase(cwd: str) -> str:
+    """Analyze codebase structure and git history for LLM context.
+
+    Extracts git log (last 30 commits) and directory structure (depth 2).
+    30 commits captures ~2-3 months of activity for pattern detection.
+
+    Args:
+        cwd: Project directory to analyze
+
+    Returns:
+        Markdown-formatted codebase summary (max 8000 chars)
+    """
+    output_parts = []
+
+    # Git history shows file relationships and change patterns
+    try:
+        result = subprocess.run(
+            ['git', 'log', '--oneline', '-30'],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            output_parts.append("## Recent Git History\n\n```")
+            output_parts.append(result.stdout.strip())
+            output_parts.append("```\n")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # Non-git directory or git unavailable; proceed with structure only
+        pass
+
+    # Directory depth=2: shows modules/packages (top) and file organization (depth 2)
+    try:
+        result = subprocess.run(
+            ['find', '.', '-maxdepth', '2', '-type', 'f', '-not', '-path', r'*/\.*'],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            output_parts.append("## Directory Structure\n\n```")
+            output_parts.append(result.stdout.strip())
+            output_parts.append("```\n")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # find unavailable; return partial summary
+        pass
+
+    summary = '\n'.join(output_parts)
+
+    # 8000 char limit: aggressive choice for maximum Gemini context (1M window available)
+    if len(summary) > 8000:
+        summary = summary[:8000] + "\n\n[truncated]"
+
+    return summary if summary else "No codebase information available."
 
 
 def copy_plan_files(changes, context_dir: Path):
@@ -231,6 +290,128 @@ Then output a JSON summary."""
         return {"status": "error", "error": str(e)}
 
 
+def enrich_empty_sections(context_path: Path, cwd: str, config: dict):
+    """Enrich empty sections in context.md using codebase analysis.
+
+    Strategy: Check → Analyze → Generate → Merge → Write
+    - Short-circuit on missing context or missing empty sections
+    - Analyze codebase to get git + structure context
+    - Use Gemini (1M context window) to generate Architecture, Patterns, Key Symbols
+    - Extract XML tags from response
+    - Merge only sections matching empty placeholders; preserve user edits
+    - Graceful failure: skip enrichment and warn on any error (must not block hook)
+
+    Invariants:
+    - Never overwrite non-empty sections (user content is sacred)
+    - Enrichment failure does not block hook completion
+    - Must use Gemini provider regardless of config default (1M context required)
+
+    Edge cases:
+    - Malformed XML: log warning, skip enrichment entirely
+    - Gemini unavailable: log warning, return gracefully
+    - Non-git directory: analyze only file structure
+
+    Args:
+        context_path: Path to context.md file
+        cwd: Project directory for codebase analysis
+        config: Plugin configuration
+    """
+    from utils.llm_client import LLMClient
+
+    if not context_path.exists():
+        logger.info("Context file doesn't exist yet, skipping enrichment")
+        return
+
+    existing_content = context_path.read_text()
+    wiki = parse(existing_content)
+
+    if not has_empty_sections(wiki):
+        logger.info("All sections populated, skipping enrichment")
+        return
+
+    if not shutil.which("gemini"):
+        logger.warning("Gemini CLI not found, skipping enrichment")
+        return
+
+    logger.info("Enriching empty sections with Gemini...")
+
+    codebase_summary = analyze_codebase(cwd)
+
+    skill_prompt = load_skill_prompt('enrich-context')
+    if not skill_prompt:
+        logger.warning("enrich-context skill not found")
+        return
+
+    prompt = f"""{skill_prompt}
+
+## Codebase Summary
+
+{codebase_summary}
+
+## Existing context.md
+
+```markdown
+{existing_content}
+```
+
+Generate enriched sections for empty placeholders only."""
+
+    try:
+        # Ensure Gemini provider: 1M context window required for full codebase analysis
+        enrichment_config = config.copy()
+        enrichment_config['provider'] = 'gemini'
+
+        llm = LLMClient(enrichment_config)
+        response = llm.generate(prompt)
+
+        arch_match = re.search(r'<architecture>(.*?)</architecture>', response, re.DOTALL)
+        patterns_match = re.search(r'<patterns>(.*?)</patterns>', response, re.DOTALL)
+        symbols_match = re.search(r'<key_symbols>(.*?)</key_symbols>', response, re.DOTALL)
+
+        updated = False
+        # Only merge extracted sections where placeholders exist; user edits take precedence
+        if arch_match and (not wiki.architecture or re.search(r'_No .* yet\._', wiki.architecture)):
+            new_arch = arch_match.group(1).strip()
+            existing_content = re.sub(
+                r'(## Architecture[^\n]*\n\n)_No architectural notes yet\._',
+                r'\1' + new_arch,
+                existing_content,
+                count=1,
+                flags=re.MULTILINE
+            )
+            updated = True
+
+        if patterns_match and not wiki.patterns:
+            new_patterns = patterns_match.group(1).strip()
+            existing_content = re.sub(
+                r'(## Patterns[^\n]*\n\n)_No patterns identified yet\._',
+                r'\1' + new_patterns,
+                existing_content,
+                flags=re.MULTILINE
+            )
+            updated = True
+
+        if symbols_match and not wiki.key_symbols:
+            new_symbols = symbols_match.group(1).strip()
+            existing_content = re.sub(
+                r'(## Key Symbols[^\n]*\n\n)_No key symbols tracked yet\._',
+                r'\1' + new_symbols,
+                existing_content,
+                flags=re.MULTILINE
+            )
+            updated = True
+
+        if updated:
+            context_path.write_text(existing_content)
+            logger.info("Enrichment complete")
+        else:
+            logger.info("No sections enriched (XML parsing may have failed)")
+
+    except Exception as e:
+        # Graceful failure: enrichment error must not block hook
+        logger.warning(f"Enrichment failed: {e}")
+
+
 def main():
     """Main entry point for Stop hook."""
     try:
@@ -320,6 +501,9 @@ def main():
             logger.warning(f"Skill analysis failed: {skill_result.get('error')}")
         else:
             logger.info(f"Updated context: {skill_result.get('context_path')}")
+
+        # Enrich empty sections if needed
+        enrich_empty_sections(context_path, cwd, config)
 
         # Copy plan files to context directory
         copy_plan_files(changes, context_dir)
