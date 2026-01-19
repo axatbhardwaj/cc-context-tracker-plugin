@@ -21,7 +21,8 @@ When you return, you (and Claude) have a single source of truth for the project'
 ## How It Works
 
 1. **Stop Hook Triggers:** When you end a Claude Code session
-2. **Analyze Changes:** Extracts modified files from session transcript
+2. **Confirm Execution:** Prompts you to confirm context generation
+3. **Analyze Changes:** Extracts modified files from session transcript
 3. **Detect Topics:** Maps files to topics (testing, api-endpoints, etc.)
 4. **Extract Reasoning:** Uses LLM with extended thinking to explain WHY changes were made
 5. **Write Markdown:** Appends single consolidated entry with topic tags to `context.md`
@@ -29,13 +30,13 @@ When you return, you (and Claude) have a single source of truth for the project'
 
 ## Features
 
-- 🎯 **Automatic capture** of file changes and reasoning after each session
+- 🎯 **Interactive capture** of file changes and reasoning after each session
 - 📄 **Consolidated output** - single `context.md` per project with inline topic tags
 - 🧠 **Extended thinking** - Sonnet 4.5 provides richer, more coherent summaries
 - 🔀 **Git sync** to private repository
 - 🏢 **Personal/Work classification** based on project paths
 - 🤖 **LLM-powered reasoning** extraction with 20k token context window
-- 📊 **Zero manual intervention** required
+- 📊 **Minimal intervention** (single confirmation prompt)
 - 📁 **Monorepo support** - hierarchical context for NX, Turborepo, Lerna, and custom workspaces
 
 ## Installation

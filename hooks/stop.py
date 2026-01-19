@@ -194,6 +194,27 @@ def prompt_monorepo_confirmation(info, config: dict) -> bool:
     return confirmed
 
 
+def confirm_execution(topics_map: dict) -> bool:
+    """Ask user for confirmation before proceeding with expensive operations.
+
+    Args:
+        topics_map: Dictionary of detected topics
+
+    Returns:
+        True if user confirms or if input is empty/y/yes
+    """
+    # Use stderr to keep stdout clean for JSON output (pipe safety)
+    print("\nDetected topics:", file=sys.stderr)
+    if topics_map:
+        for topic in topics_map:
+            print(f"  - {topic}", file=sys.stderr)
+    else:
+        print("  - general-changes", file=sys.stderr)
+
+    print("\nGenerate context and push changes? [Y/n]: ", file=sys.stderr, end='', flush=True)
+    return _get_user_confirmation()
+
+
 def copy_plan_files(changes, context_dir: Path):
     """Copy plan files to context directory."""
     plans_dir = context_dir / 'plans'
@@ -606,6 +627,12 @@ def main():
         detector = TopicDetector(config)
         topics_map = detector.detect_topics(changes)
         all_topics = list(topics_map.keys())
+
+        # Prompt gives user control over execution
+        if not confirm_execution(topics_map):
+            logger.info("User skipped context generation")
+            print(json.dumps({}), file=sys.stdout)
+            sys.exit(0)
 
         # Use skill-based analysis to update context.md
         logger.info("Extracting session context...")
