@@ -354,6 +354,37 @@ To add custom workspace directories beyond the defaults (`apps/`, `libs/`, `pack
 
 See [examples/context-monorepo.md](examples/context-monorepo.md) for a complete example.
 
+## Opencode Integration
+
+The plugin supports Opencode via manual synchronization since Opencode currently lacks automatic stop hooks.
+
+### Setup
+
+1. **Copy the agent definition**:
+   ```bash
+   cp agents/context-tracker.md ~/.config/opencode/agents/
+   ```
+
+2. **Add global rules** (optional but recommended):
+   Add the following to `~/.config/opencode/AGENTS.md`:
+   ```markdown
+   # Context Tracking (Opencode)
+
+   At the end of a session, invoke the context-tracker:
+   @context-tracker Sync: <brief summary of what was done>
+   ```
+
+### Usage
+
+Trigger a manual sync by mentioning the agent with a summary of your changes:
+
+`@context-tracker Sync: Added login feature`
+
+The agent will then:
+1. Generate a detailed session log.
+2. Call `opencode_sync.py` to update your `context.md` and history.
+3. Sync the changes to your private Git repository.
+
 ## License
 
 MIT License - see LICENSE file

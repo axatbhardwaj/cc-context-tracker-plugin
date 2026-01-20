@@ -20,12 +20,13 @@ Automated context tracking plugin for Claude Code sessions.
 | Directory  | What                                        | When to read                                  |
 | ---------- | ------------------------------------------- | --------------------------------------------- |
 | `core/`    | Session analysis, wiki parsing, git sync    | Modifying analysis logic, debugging core flow |
-| `hooks/`   | Claude Code stop hook entry point           | Debugging hook execution, understanding flow  |
+| `hooks/`   | Claude Code stop hook & Opencode manual sync | Debugging hook execution, understanding flow  |
 | `utils/`   | LLM client, file helpers, logging           | Changing LLM calls, adding utilities          |
 | `config/`  | User config, topic patterns                 | Configuring paths, adding topics              |
 | `tests/`   | Test suite for all components               | Running tests, adding test coverage           |
 | `scripts/` | Shared shell utilities for install scripts  | Modifying install/uninstall behavior          |
-| `skills/`  | Claude Code skills for context analysis     | Understanding skill-based analysis            |
+| `skills/`  | Claude Code & Opencode skills               | Understanding skill-based analysis            |
+| `agents/`  | Opencode agent definitions                  | Configuring Opencode context-tracker agent    |
 | `examples/`| Sample context.md files                     | Understanding output format, learning patterns|
 
 ## Build
