@@ -154,10 +154,18 @@ def _get_user_confirmation() -> bool:
 
     Called by prompt_monorepo_confirmation to read user input.
     Empty response treated as Yes for faster workflow.
+    Auto-confirms if CONTEXT_TRACKER_AUTO_CONFIRM=1 or stdin is not a TTY.
 
     Returns:
         True if user confirms
     """
+    # Auto-confirm if env var set or not running interactively
+    if os.environ.get('CONTEXT_TRACKER_AUTO_CONFIRM') == '1':
+        logger.info("Auto-confirming (CONTEXT_TRACKER_AUTO_CONFIRM=1)")
+        return True
+    if not sys.stdin.isatty():
+        logger.info("Auto-confirming (non-interactive mode)")
+        return True
     try:
         response = input().strip().lower()
         return response in ('', 'y', 'yes')
