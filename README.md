@@ -24,7 +24,7 @@ When you return, you (and Claude) have a single source of truth for the project'
 2. **Confirm Execution:** Prompts you to confirm context generation
 3. **Analyze Changes:** Extracts modified files from session transcript
 3. **Detect Topics:** Maps files to topics (testing, api-endpoints, etc.)
-4. **Extract Reasoning:** Uses LLM with extended thinking to explain WHY changes were made
+4. **Extract Reasoning:** Uses LLM to explain WHY changes were made
 5. **Write Markdown:** Appends single consolidated entry with topic tags to `context.md`
 6. **Git Sync:** Commits and pushes to your private repository
 
@@ -32,11 +32,11 @@ When you return, you (and Claude) have a single source of truth for the project'
 
 - 🎯 **Interactive capture** of file changes and reasoning after each session
 - 📄 **Consolidated output** - single `context.md` per project with inline topic tags
-- 🧠 **Extended thinking** - Sonnet 4.5 provides richer, more coherent summaries
+- 🧠 **LLM-powered summaries** - Sonnet provides richer, more coherent session context
 - 💎 **Context Enrichment** - Automatically fills empty architecture and pattern sections using codebase analysis via Gemini
 - 🔀 **Git sync** to private repository
 - 🏢 **Personal/Work classification** based on project paths
-- 🤖 **LLM-powered reasoning** extraction with 20k token context window
+- 🤖 **LLM-powered reasoning** extraction with ~12k token input context
 - 📊 **Minimal intervention** (single confirmation prompt)
 - 📁 **Monorepo support** - hierarchical context for NX, Turborepo, Lerna, and custom workspaces
 
@@ -254,23 +254,31 @@ The plugin uses `config/config.json` for user configuration. If this file doesn'
   - `min_changes_threshold`: Minimum file changes to trigger tracking
   - `max_session_entries_per_topic`: Max entries per topic file
 - **llm_config**: LLM settings for reasoning extraction
-  - `model`: Claude model to use (default: "claude-sonnet-4-5-20250514")
+  - `model`: Claude model to use (default: "sonnet")
   - `max_tokens`: Maximum tokens for session summary (default: 20000)
-  - `thinking_budget`: Extended thinking token budget (default: 10000)
   - `temperature`: LLM temperature for generation (default: 0.3)
 
 See `config/example-config.json` for a complete example with all available options.
 
-### Extended Thinking Configuration
+### Context Window
 
-The plugin uses Claude's extended thinking capability for richer context extraction:
+The plugin uses a 50,000 character input context (~12,000 tokens) for transcript analysis, with a 20,000 token output limit for generated summaries. This allows analysis of most session transcripts without truncation.
 
-- **thinking_budget**: 10,000 tokens by default - balances quality vs cost
-- Adds ~5-10 seconds latency per session (acceptable for background operation)
-- Produces more coherent consolidated summaries than standard mode
-- Set `thinking_budget: 0` to disable extended thinking if needed
+### Advanced Configuration
 
-The 20,000 token context window allows analysis of full session transcripts without truncation.
+#### Auto-Confirmation
+
+To skip interactive prompts (useful for CI/CD or automated workflows):
+
+```bash
+export CONTEXT_TRACKER_AUTO_CONFIRM=1
+```
+
+When set, the plugin will automatically proceed without prompting for confirmation. The plugin also auto-confirms when running in non-interactive mode (no TTY).
+
+#### Cooldown Period
+
+The plugin implements a 2-hour cooldown per project to prevent excessive executions. If you end multiple sessions within 2 hours, subsequent runs will be skipped automatically. The cooldown state is tracked in `/tmp/context-tracker-cooldowns.json`.
 
 ## Monorepo Support
 
