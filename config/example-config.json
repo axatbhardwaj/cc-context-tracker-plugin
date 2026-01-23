@@ -1,13 +1,7 @@
 {
   "context_root": "~/context",
-  "work_path_patterns": [
-    "~/work/",
-    "~/company/"
-  ],
-  "personal_path_patterns": [
-    "~/personal/",
-    "~/projects/"
-  ],
+  "work_path_patterns": ["~/work/", "~/company/"],
+  "personal_path_patterns": ["~/personal/", "~/projects/"],
   "excluded_paths": [
     "/tmp/",
     "~/Downloads/",
@@ -33,7 +27,6 @@
   "llm_config": {
     "model": "claude-sonnet-4-5-20250514",
     "max_tokens": 20000,
-    "thinking_budget": 10000,
     "temperature": 0.3,
     "use_for_reasoning": true,
     "use_for_topic_detection": true,
