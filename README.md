@@ -18,38 +18,214 @@ Every time you exit a session, it:
 
 When you return, you (and Claude) have a single source of truth for the project's history.
 
-## How It Works
+## Installation for Claude (LLM-Driven)
 
-1. **Stop Hook Triggers:** When you end a Claude Code session
-2. **Confirm Execution:** Prompts you to confirm context generation
-3. **Analyze Changes:** Extracts modified files from session transcript
-3. **Detect Topics:** Maps files to topics (testing, api-endpoints, etc.)
-4. **Extract Reasoning:** Uses LLM to explain WHY changes were made
-5. **Write Markdown:** Appends single consolidated entry with topic tags to `context.md`
-6. **Git Sync:** Commits and pushes to your private repository
+This section is written so an LLM assistant (Claude Code, etc.) can autonomously install and configure the plugin by following each step exactly.
 
-## Features
+### Step 0: Gather information from the user
 
-- 🎯 **Interactive capture** of file changes and reasoning after each session
-- 📄 **Consolidated output** - single `context.md` per project with inline topic tags
-- 🧠 **LLM-powered summaries** - Sonnet provides richer, more coherent session context
-- 💎 **Context Enrichment** - Automatically fills empty architecture and pattern sections using codebase analysis via Gemini
-- 🔀 **Git sync** to private repository
-- 🏢 **Personal/Work classification** based on project paths
-- 🤖 **LLM-powered reasoning** extraction with ~12k token input context
-- 📊 **Minimal intervention** (single confirmation prompt)
-- 📁 **Monorepo support** - hierarchical context for NX, Turborepo, Lerna, and custom workspaces
+Ask the user for:
+1. **Clone location** - Where to clone this repo (default: `~/personal/context-tracker`)
+2. **GitHub repo URL** - A private GitHub repo for syncing context (e.g. `git@github.com:username/claude-context.git`). The user must create this repo on GitHub first.
+3. **Work directory patterns** - Comma-separated paths for work projects (default: `~/work`)
+4. **Personal directory patterns** - Comma-separated paths for personal projects (default: `~/personal, ~/projects`)
 
-## Installation
+### Step 1: Clone context-tracker
 
-### Prerequisites
-- Claude Code CLI
-- Python 3.8+
-- Git
-- Google Gemini CLI (optional, for context enrichment)
-- jq (optional, recommended)
+```bash
+# Use the clone location from Step 0
+git clone https://github.com/axatbhardwaj/context-tracker.git <CLONE_LOCATION>
+```
 
-### Quick Install
+**Verify:** The directory exists and contains `install.sh`.
+
+### Step 2: Run the installer
+
+```bash
+cd <CLONE_LOCATION>
+./install.sh --yes \
+  --context-root=~/context \
+  --work-patterns="<WORK_PATTERNS>" \
+  --personal-patterns="<PERSONAL_PATTERNS>"
+```
+
+The `--yes` flag runs non-interactively. The installer will:
+- Create the plugin symlink at `~/.claude/plugins/user/context-tracker`
+- Add the stop hook to `~/.claude/settings.json`
+- Generate `config/config.json` with the user's paths
+- Initialize `~/context/` as a git repo with initial commit
+
+**Verify:** All four checks pass:
+```bash
+test -L ~/.claude/plugins/user/context-tracker && echo "Symlink OK"
+grep -q "context-tracker" ~/.claude/settings.json && echo "Hook OK"
+test -f <CLONE_LOCATION>/config/config.json && echo "Config OK"
+test -d ~/context/.git && echo "Context repo OK"
+```
+
+### Step 3: Configure git remote on `~/context/`
+
+The installer creates `~/context/` as a local-only git repo. Without a remote, `git push` silently fails and context is never synced.
+
+```bash
+cd ~/context
+git remote add origin <GITHUB_REPO_URL>
+git push -u origin main
+```
+
+**Verify:**
+```bash
+cd ~/context && git push --dry-run 2>&1
+```
+
+**Decision tree based on output:**
+- Output contains `Everything up-to-date` or no errors → **Success.** Skip to Step 5.
+- Output contains `Permission denied` or `authentication` → **Auth problem.** Proceed to Step 4.
+- Output contains `No configured push destination` → **Remote not set.** Re-run Step 3.
+- Output contains `does not exist` → **Repo not created on GitHub.** Ask user to create the repo first, then re-run Step 3.
+
+### Step 4: Configure git authentication for `~/context/`
+
+This step ensures `git push` from `~/context/` actually works. **Choose ONE path** based on the user's setup - these are mutually exclusive:
+
+- **Path A (includeIf):** User has `includeIf` entries in `~/.gitconfig` (multiple GitHub identities)
+- **Path B (default SSH):** User has a single SSH key for GitHub (no `includeIf`)
+- **Path C (HTTPS fallback):** SSH doesn't work; use `gh` CLI instead
+
+**First, determine which path applies:**
+
+```bash
+grep -c 'includeIf' ~/.gitconfig 2>/dev/null
+```
+
+- If output is `1` or more → **Use Path A**
+- If output is `0` or file doesn't exist → **Use Path B**
+
+#### Path A: `includeIf` patterns in `~/.gitconfig`
+
+Users with multiple GitHub identities use `includeIf` in `~/.gitconfig` to scope SSH keys by directory.
+
+**Check if `~/context/` is already covered:**
+
+```bash
+cd ~/context && git config core.sshCommand
+```
+
+- If this outputs an SSH command (e.g., `ssh -i ~/.ssh/id_personal`) → `~/context/` is already covered. **Skip to Step 5.**
+- If empty or no output → `~/context/` is NOT covered. Continue below.
+
+**Fix:** Find which config file the user's personal projects use, then add the same mapping for `~/context/`.
+
+```bash
+# List all includeIf entries and their config files
+grep -A1 'includeIf' ~/.gitconfig
+```
+
+**Ask the user:** "Which of these includeIf config files should `~/context/` use?" Let them pick one (typically the personal one).
+
+Then append to `~/.gitconfig`:
+```gitconfig
+[includeIf "gitdir:~/context/"]
+    path = <CONFIG_FILE_USER_CHOSE>
+```
+
+**Verify:**
+```bash
+cd ~/context && git config core.sshCommand
+# Must output an ssh command. If empty, the includeIf entry is wrong.
+```
+
+**Done.** Skip to Step 5.
+
+#### Path B: Default SSH key
+
+Test if SSH authentication works with GitHub:
+
+```bash
+ssh -T git@github.com 2>&1
+```
+
+- If output contains `Hi` and `successfully authenticated` → **SSH works. Skip to Step 5.**
+- If output contains `Permission denied` → **SSH not working. Proceed to Path C.**
+
+#### Path C: HTTPS fallback with `gh` CLI
+
+If SSH doesn't work, switch the remote to HTTPS and use `gh` CLI for authentication.
+
+**Check `gh` is installed and authenticated:**
+```bash
+command -v gh && gh auth status 2>&1
+```
+
+- If `gh` is not found → **Ask user** to install it (`https://cli.github.com/`) or configure SSH manually.
+- If `gh auth status` shows `Logged in` → Continue below.
+- If not logged in → Run `gh auth login` and follow prompts.
+
+**Switch remote to HTTPS** (derive from the SSH URL provided in Step 0):
+```bash
+cd ~/context
+# Convert git@github.com:user/repo.git → https://github.com/user/repo.git
+git remote set-url origin https://github.com/<USERNAME>/<REPO>.git
+```
+
+Replace `<USERNAME>/<REPO>` with the values from the GitHub repo URL the user provided in Step 0.
+
+**Verify:**
+```bash
+cd ~/context && git push --dry-run 2>&1
+# Must succeed without errors
+```
+
+### Step 5: Add context instructions to `~/.claude/CLAUDE.md`
+
+**First, check if context instructions already exist** (idempotency):
+```bash
+grep -q "Project Context Memory" ~/.claude/CLAUDE.md 2>/dev/null
+```
+
+- If the grep matches → **Already present. Skip to Step 6.**
+- If no match (or file doesn't exist) → Append the block below to `~/.claude/CLAUDE.md` (create the file if it doesn't exist):
+
+```markdown
+# Project Context Memory
+
+Before starting work on any project, check for context at `~/context/{classification}/{project-name}/`:
+
+**Structure:**
+- `context.md` - Wiki with Architecture, Decisions, Patterns, Issues, Recent Work
+- `history/` - Immutable session logs with full details
+- `plans/` - Implementation plans for complex features
+
+**On session start:**
+1. Derive path: `~/context/personal/{project-name}/context.md` or `~/context/work/{project-name}/context.md`
+2. Read `context.md` if it exists
+3. Check Recent Work for what was done last
+4. Review Decisions to follow established patterns
+5. Check Issues to avoid repeating solved problems
+
+**While working:**
+- Follow patterns documented in Decisions section
+- Reference history files via `[[Details](history/...)]` links for full context
+
+**Example:**
+For project at `~/personal/my-app/`, read `~/context/personal/my-app/context.md`
+```
+
+**Verify:** The block is present in `~/.claude/CLAUDE.md`.
+
+### Step 6: End-to-end verification
+
+Run a final push test to confirm everything works:
+
+```bash
+cd ~/context && git push --dry-run
+```
+
+**Expected:** No errors. If this succeeds, the plugin is fully installed and will sync context after every Claude Code session.
+
+## Quick Install (Interactive)
+
+For manual/interactive installation:
 
 ```bash
 git clone https://github.com/axatbhardwaj/context-tracker.git
@@ -73,6 +249,11 @@ For scripted installs, use flags to skip prompts:
   --work-patterns="~/work, ~/company" \
   --personal-patterns="~/personal, ~/projects"
 ```
+
+**Important:** After running the installer, you still need to:
+- Add a git remote to `~/context/` (see Step 3 above)
+- Configure git authentication if you use `includeIf` (see Step 4 above)
+- Add context instructions to `~/.claude/CLAUDE.md` (see Step 5 above)
 
 ### Manual Setup
 
@@ -126,6 +307,28 @@ This removes the hook and symlink but preserves your context data.
 ### Test
 
 After installation, start a Claude Code session, make some changes, and exit. Check `~/context/` for new entries.
+
+## How It Works
+
+1. **Stop Hook Triggers:** When you end a Claude Code session
+2. **Confirm Execution:** Prompts you to confirm context generation
+3. **Analyze Changes:** Extracts modified files from session transcript
+3. **Detect Topics:** Maps files to topics (testing, api-endpoints, etc.)
+4. **Extract Reasoning:** Uses LLM to explain WHY changes were made
+5. **Write Markdown:** Appends single consolidated entry with topic tags to `context.md`
+6. **Git Sync:** Commits and pushes to your private repository
+
+## Features
+
+- **Interactive capture** of file changes and reasoning after each session
+- **Consolidated output** - single `context.md` per project with inline topic tags
+- **LLM-powered summaries** - Sonnet provides richer, more coherent session context
+- **Context Enrichment** - Automatically fills empty architecture and pattern sections using codebase analysis via Gemini
+- **Git sync** to private repository
+- **Personal/Work classification** based on project paths
+- **LLM-powered reasoning** extraction with ~12k token input context
+- **Minimal intervention** (single confirmation prompt)
+- **Monorepo support** - hierarchical context for NX, Turborepo, Lerna, and custom workspaces
 
 ## Using Captured Context
 
