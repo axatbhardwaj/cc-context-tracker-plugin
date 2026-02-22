@@ -2,11 +2,11 @@
 """Unit tests for wiki parser module."""
 
 import pytest
-from core.wiki_parser import WikiKnowledge, parse, _extract_list_items
+from core.wiki_parser import WikiKnowledge, parse, has_empty_sections, _extract_list_items
 
 
 class TestParseAllSections:
-    """Test parse() extracts all 5 sections from valid wiki."""
+    """Test parse() extracts all sections from valid wiki."""
 
     def test_extracts_architecture_section(self):
         content = """# Project Context
@@ -24,10 +24,6 @@ This is the architecture section with explanations.
 
 - Pattern 1
 
-## Issues
-
-- Issue 1
-
 ## Recent Work
 
 - [2024-01-01] Recent work 1
@@ -36,7 +32,6 @@ This is the architecture section with explanations.
         assert wiki.architecture == "This is the architecture section with explanations."
         assert wiki.decisions == ["Decision 1", "Decision 2"]
         assert wiki.patterns == ["Pattern 1"]
-        assert wiki.issues == ["Issue 1"]
         assert wiki.recent_work == ["[2024-01-01] Recent work 1"]
 
     def test_handles_asterisk_bullets(self):
@@ -50,18 +45,6 @@ This is the architecture section with explanations.
         wiki = parse(content)
         assert wiki.decisions == ["Decision with asterisk", "Another decision"]
 
-    def test_handles_mixed_bullet_styles(self):
-        content = """## Issues
-
-- Dash issue
-* Asterisk issue
-- Another dash
-
-## Recent Work
-"""
-        wiki = parse(content)
-        assert wiki.issues == ["Dash issue", "Asterisk issue", "Another dash"]
-
 
 class TestParseEmptySections:
     """Test parse() handles empty sections correctly."""
@@ -73,15 +56,12 @@ class TestParseEmptySections:
 
 ## Patterns
 
-## Issues
-
 ## Recent Work
 """
         wiki = parse(content)
         assert wiki.architecture == ""
         assert wiki.decisions == []
         assert wiki.patterns == []
-        assert wiki.issues == []
         assert wiki.recent_work == []
 
     def test_partial_sections_populated(self):
@@ -95,15 +75,12 @@ Some architecture notes.
 
 - Active pattern
 
-## Issues
-
 ## Recent Work
 """
         wiki = parse(content)
         assert wiki.architecture == "Some architecture notes."
         assert wiki.decisions == []
         assert wiki.patterns == ["Active pattern"]
-        assert wiki.issues == []
         assert wiki.recent_work == []
 
 
@@ -125,7 +102,6 @@ Did some work.
         assert wiki.architecture == ""
         assert wiki.decisions == []
         assert wiki.patterns == []
-        assert wiki.issues == []
         assert wiki.recent_work == []
 
     def test_h3_headers_not_matched_as_wiki_sections(self):
@@ -200,7 +176,7 @@ class TestExtractListItems:
 -    Lots of leading space
 - Normal item
 
-## Issues
+## Recent Work
 """
         items = _extract_list_items(content, "Patterns")
         assert items == ["Lots of leading space", "Normal item"]
@@ -212,3 +188,25 @@ class TestExtractListItems:
 """
         items = _extract_list_items(content, "Decisions")
         assert items == []
+
+
+class TestHasEmptySections:
+    """Tests for has_empty_sections(): checks architecture and patterns only (ref: DL-003)."""
+
+    def test_empty_architecture_returns_true(self):
+        """Returns True when architecture is empty string."""
+        wiki = WikiKnowledge()
+        assert has_empty_sections(wiki) is True
+
+    def test_populated_returns_false(self):
+        """Returns False when architecture text and patterns both present."""
+        wiki = WikiKnowledge(
+            architecture="Has content",
+            patterns=["Pattern 1"],
+        )
+        assert has_empty_sections(wiki) is False
+
+    def test_placeholder_architecture_returns_true(self):
+        """Returns True when architecture matches `_No .* yet._` placeholder."""
+        wiki = WikiKnowledge(architecture="_No architectural notes yet._", patterns=["p"])
+        assert has_empty_sections(wiki) is True

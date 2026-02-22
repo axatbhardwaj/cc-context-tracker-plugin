@@ -2,7 +2,7 @@
 
 ## Subdirectories
 
-| Directory          | What                                                        | When to read                            |
-| ------------------ | ----------------------------------------------------------- | --------------------------------------- |
-| `analyze-session/` | Session transcript analysis skill                           | Understanding skill-based analysis      |
-| `enrich-context/`  | Skill for enriching empty Architecture, Patterns, Key Symbols sections | Adding/modifying enrichment prompt |
+| Directory          | What                                                   | When to read                            |
+| ------------------ | ------------------------------------------------------ | --------------------------------------- |
+| `architect-agent/` | Architecture.md generation via opus model              | Modifying architecture prompt           |
+| `writer-agent/`    | Context.md merging via sonnet model                    | Modifying context update prompt         |

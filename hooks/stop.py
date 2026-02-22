@@ -18,7 +18,7 @@ if PLUGIN_ROOT and PLUGIN_ROOT not in sys.path:
 from core.session_analyzer import SessionAnalyzer
 from core.markdown_writer import MarkdownWriter
 from core.topic_detector import TopicDetector
-from core.wiki_parser import parse, has_empty_sections
+from core.wiki_parser import parse
 from core.monorepo_detector import detect_monorepo
 from core.path_classifier import PathClassifier
 from core.git_sync import GitSync
@@ -79,7 +79,7 @@ def analyze_codebase(cwd: str) -> str:
 
     summary = '\n'.join(output_parts)
 
-    # 8000 char limit: aggressive choice for maximum Gemini context (1M window available)
+    # 8000 char limit for codebase summary sent to LLM
     if len(summary) > 8000:
         summary = summary[:8000] + "\n\n[truncated]"
 
@@ -224,53 +224,6 @@ def confirm_execution(topics_map: dict) -> bool:
     return _get_user_confirmation()
 
 
-def copy_plan_files(changes, context_dir: Path):
-    """Copy plan files to context directory."""
-    plans_dir = context_dir / 'plans'
-
-    for change in changes:
-        file_path = Path(change.file_path)
-
-        # Check if it's a plan file
-        if '.claude/plans/' in str(file_path) or '/plans/' in str(file_path):
-            if file_path.exists() and file_path.suffix == '.md':
-                ensure_directory(plans_dir)
-                dest = plans_dir / file_path.name
-                shutil.copy2(file_path, dest)
-                logger.info(f"Copied plan file: {file_path.name}")
-
-
-def cleanup_old_topic_files(context_dir: Path):
-    """Delete legacy .md files in context directory, preserving context.md.
-
-    Runs once per project (marker file gates re-execution). Non-recursive glob
-    excludes plans/ subdirectory. Skips execution if marker exists.
-
-    Args:
-        context_dir: Context directory for current project
-    """
-    marker_file = context_dir / '.migrated'
-
-    # Marker file gates cleanup execution (only runs once per project)
-    if marker_file.exists():
-        return
-
-    # Non-recursive glob naturally excludes plans/ subdirectory
-    if not context_dir.exists():
-        return
-
-    for md_file in context_dir.glob('*.md'):
-        # Skip context.md during cleanup
-        if md_file.name == 'context.md':
-            continue
-
-        md_file.unlink()
-        logger.info(f"Deleted old topic file: {md_file.name}")
-
-    # Marker prevents accidental re-deletion on subsequent runs
-    marker_file.touch()
-
-
 def extract_cwd_from_transcript(transcript_path: str) -> str:
     """Extract cwd from transcript path.
 
@@ -346,38 +299,37 @@ def load_skill_prompt(skill_name: str) -> str:
     return content
 
 
-def analyze_with_skill(
+def update_context_wiki(
     session_content: str,
     context_path: str,
     topics: list,
     config: dict,
-    log_file_name: str = "",
 ) -> dict:
-    """Analyze session using skill-based prompt via LLM client.
+    """Update context.md via technical-writer agent.
+
+    Uses ~/.claude/agents/technical-writer.md (sonnet) for LLM-optimized merging.
 
     Args:
-        session_content: Content of the session log
-        context_path: Path to context.md file
-        topics: List of detected topics
-        config: Plugin configuration
+        session_content: In-memory session entry text
+        context_path: Absolute path to context.md file
+        topics: Detected topic tags for the session
+        config: Plugin configuration dict
 
     Returns:
-        Dict with analysis result
+        Dict with 'status' and 'context_path' keys on success, 'error' on failure
     """
     from utils.llm_client import LLMClient
 
-    skill_prompt = load_skill_prompt('analyze-session')
+    skill_prompt = load_skill_prompt('writer-agent')
     if not skill_prompt:
-        return {"status": "error", "error": "Skill not found"}
+        return {"status": "error", "error": "writer-agent skill not found"}
 
-    # Read existing context.md
     existing_context = ""
     if Path(context_path).exists():
         existing_context = Path(context_path).read_text()
 
     topics_str = ','.join(topics) if topics else 'general-changes'
 
-    # Build prompt with skill instructions and data
     prompt = f"""{skill_prompt}
 
 ## Current Task
@@ -386,7 +338,6 @@ Analyze this session summary and update the context wiki.
 
 Arguments:
 - topics: {topics_str}
-- log_file: history/{log_file_name}
 
 ### Existing context.md:
 ```markdown
@@ -402,15 +353,9 @@ Output the complete updated context.md content between <context_md> tags.
 Then output a JSON summary."""
 
     try:
-        # Force provider to be gemini if not specified, or respect config?
-        # The user requested generic "gemini integration", so we should prefer gemini here.
-        # But LLMClient logic handles config. We should ensure config has provider='gemini'
-        # if the user hasn't set it, OR rely on LLMClient default.
-        # For now, we trust the config passed in.
         llm = LLMClient(config)
-        response = llm.generate(prompt)  # Gemini has large context
+        response = llm.generate(prompt, agent="technical-writer")
 
-        # Extract context.md content from response
         context_match = re.search(
             r'<context_md>(.*?)</context_md>',
             response,
@@ -426,60 +371,42 @@ Then output a JSON summary."""
         return {"status": "error", "error": "No context_md tags in response"}
 
     except Exception as e:
-        logger.warning(f"Skill analysis failed: {e}")
+        logger.warning(f"Writer agent failed: {e}")
         return {"status": "error", "error": str(e)}
 
 
-def enrich_empty_sections(context_path: Path, cwd: str, config: dict):
-    """Enrich empty sections in context.md using codebase analysis.
+def generate_architecture(context_path: Path, cwd: str, config: dict):
+    """Generate or update architecture.md via architect agent.
 
-    Strategy: Check → Analyze → Generate → Merge → Write
-    - Short-circuit on missing context or missing empty sections
-    - Analyze codebase to get git + structure context
-    - Use Gemini (1M context window) to generate Architecture, Patterns, Key Symbols
-    - Extract XML tags from response
-    - Merge only sections matching empty placeholders; preserve user edits
-    - Graceful failure: skip enrichment and warn on any error (must not block hook)
+    Uses ~/.claude/agents/architect.md (opus) for deep architectural reasoning.
+    Writes architecture.md to the same directory as context_path.
 
-    Invariants:
-    - Never overwrite non-empty sections (user content is sacred)
-    - Enrichment failure does not block hook completion
-    - Must use Gemini provider regardless of config default (1M context required)
-
-    Edge cases:
-    - Malformed XML: log warning, skip enrichment entirely
-    - Gemini unavailable: log warning, return gracefully
-    - Non-git directory: analyze only file structure
+    Graceful failure: logs warning and returns without blocking the hook.
 
     Args:
-        context_path: Path to context.md file
+        context_path: Path to context.md (architecture.md lives in same directory)
         cwd: Project directory for codebase analysis
         config: Plugin configuration
     """
     from utils.llm_client import LLMClient
 
-    if not context_path.exists():
-        logger.info("Context file doesn't exist yet, skipping enrichment")
+    if not shutil.which("claude"):
+        logger.warning("Claude CLI not found, skipping architecture generation")
         return
 
-    existing_content = context_path.read_text()
-    wiki = parse(existing_content)
+    arch_path = context_path.parent / "architecture.md"
 
-    if not has_empty_sections(wiki):
-        logger.info("All sections populated, skipping enrichment")
-        return
+    existing_arch = ""
+    if arch_path.exists():
+        existing_arch = arch_path.read_text()
 
-    if not shutil.which("gemini"):
-        logger.warning("Gemini CLI not found, skipping enrichment")
-        return
-
-    logger.info("Enriching empty sections with Gemini...")
+    logger.info("Generating architecture via architect agent...")
 
     codebase_summary = analyze_codebase(cwd)
 
-    skill_prompt = load_skill_prompt('enrich-context')
+    skill_prompt = load_skill_prompt('architect-agent')
     if not skill_prompt:
-        logger.warning("enrich-context skill not found")
+        logger.warning("architect-agent skill not found")
         return
 
     prompt = f"""{skill_prompt}
@@ -488,68 +415,37 @@ def enrich_empty_sections(context_path: Path, cwd: str, config: dict):
 
 {codebase_summary}
 
-## Existing context.md
+## Existing architecture.md
 
 ```markdown
-{existing_content}
+{existing_arch if existing_arch else '(empty - generate from scratch)'}
 ```
 
-Generate enriched sections for empty placeholders only."""
+Output the complete architecture.md content between <architecture_md> tags."""
 
     try:
-        # Ensure Gemini provider: 1M context window required for full codebase analysis
-        enrichment_config = config.copy()
-        enrichment_config['provider'] = 'gemini'
+        llm = LLMClient(config)
+        response = llm.generate(prompt, agent="architect")
 
-        llm = LLMClient(enrichment_config)
-        response = llm.generate(prompt)
+        arch_match = re.search(
+            r'<architecture_md>(.*?)</architecture_md>',
+            response,
+            re.DOTALL
+        )
 
-        arch_match = re.search(r'<architecture>(.*?)</architecture>', response, re.DOTALL)
-        patterns_match = re.search(r'<patterns>(.*?)</patterns>', response, re.DOTALL)
-        symbols_match = re.search(r'<key_symbols>(.*?)</key_symbols>', response, re.DOTALL)
-
-        updated = False
-        # Only merge extracted sections where placeholders exist; user edits take precedence
-        if arch_match and (not wiki.architecture or re.search(r'_No .* yet\._', wiki.architecture)):
-            new_arch = arch_match.group(1).strip()
-            existing_content = re.sub(
-                r'(## Architecture[^\n]*\n\n)_No architectural notes yet\._',
-                r'\1' + new_arch,
-                existing_content,
-                count=1,
-                flags=re.MULTILINE
-            )
-            updated = True
-
-        if patterns_match and not wiki.patterns:
-            new_patterns = patterns_match.group(1).strip()
-            existing_content = re.sub(
-                r'(## Patterns[^\n]*\n\n)_No patterns identified yet\._',
-                r'\1' + new_patterns,
-                existing_content,
-                flags=re.MULTILINE
-            )
-            updated = True
-
-        if symbols_match and not wiki.key_symbols:
-            new_symbols = symbols_match.group(1).strip()
-            existing_content = re.sub(
-                r'(## Key Symbols[^\n]*\n\n)_No key symbols tracked yet\._',
-                r'\1' + new_symbols,
-                existing_content,
-                flags=re.MULTILINE
-            )
-            updated = True
-
-        if updated:
-            context_path.write_text(existing_content)
-            logger.info("Enrichment complete")
+        if arch_match:
+            new_content = arch_match.group(1).strip()
+            if new_content:
+                arch_path.parent.mkdir(parents=True, exist_ok=True)
+                arch_path.write_text(new_content)
+                logger.info(f"Updated architecture: {arch_path}")
+            else:
+                logger.warning("Architect agent returned empty content, skipping write")
         else:
-            logger.info("No sections enriched (XML parsing may have failed)")
+            logger.warning("No architecture_md tags in response, skipping write")
 
     except Exception as e:
-        # Graceful failure: enrichment error must not block hook
-        logger.warning(f"Enrichment failed: {e}")
+        logger.warning(f"Architecture generation failed: {e}")
 
 
 COOLDOWN_FILE = Path('/tmp/context-tracker-cooldowns.json')
@@ -678,9 +574,6 @@ def main():
         # Ensure context directory exists
         ensure_directory(context_dir)
 
-        # One-time cleanup of legacy topic files
-        cleanup_old_topic_files(context_dir)
-
         # Detect topics from changes
         detector = TopicDetector(config)
         topics_map = detector.detect_topics(changes)
@@ -696,54 +589,40 @@ def main():
         logger.info("Extracting session context...")
         session_ctx = analyzer.extract_session_context(changes, all_topics)
 
-        # Write immutable log
+        # Session content formatted in-memory — no history file written (ref: DL-006)
         writer = MarkdownWriter(config)
-        log_path = writer.write_session_log(
-            context_dir,
-            all_topics,
-            changes,
-            reasoning=session_ctx.summary,
-            context=session_ctx,
-        )
-        logger.info(f"Written session log: {log_path}")
-
-        # Update wiki using log content
-        logger.info("Updating wiki with Gemini...")
-        log_content = log_path.read_text()
-        skill_result = analyze_with_skill(
-            log_content,
+        session_content = writer._format_session_entry(all_topics, changes, session_ctx.summary, session_ctx)
+        # Writer agent: update context.md (sonnet)
+        logger.info("Updating context.md via writer agent...")
+        skill_result = update_context_wiki(
+            session_content,
             str(context_path),
             all_topics,
             config,
-            log_file_name=log_path.name,
         )
 
         if skill_result.get('status') == 'error':
-            logger.warning(f"Skill analysis failed: {skill_result.get('error')}")
+            logger.warning(f"Writer agent failed: {skill_result.get('error')}")
         else:
             logger.info(f"Updated context: {skill_result.get('context_path')}")
 
-        # Enrich empty sections if needed
-        enrich_empty_sections(context_path, cwd, config)
+        # Architect agent: update architecture.md (opus)
+        generate_architecture(context_path, cwd, config)
 
-        # Root context captures cross-cutting architecture decisions
+        # Root context captures cross-cutting decisions for monorepos
         if len(context_paths) > 1:
             root_context_path = context_paths[0]
             ensure_directory(root_context_path.parent)
             try:
-                root_result = analyze_with_skill(
-                    log_content,
+                root_result = update_context_wiki(
+                    session_content,
                     str(root_context_path),
                     all_topics,
                     config,
-                    log_file_name=log_path.name,
                 )
                 logger.info(f"Updated root context: {root_result.get('context_path')}")
             except Exception as e:
                 logger.warning(f"Failed to update root context: {e}")
-
-        # Copy plan files to context directory
-        copy_plan_files(changes, context_dir)
 
         # Git sync
         git = GitSync(config.get('context_root', '~/context'), config)

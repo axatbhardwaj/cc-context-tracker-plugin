@@ -149,12 +149,19 @@ class MarkdownWriter:
 
         return '\n'.join(parts)
 
-    def write_wiki(self, wiki: WikiKnowledge, context_dir: Path) -> Path:
-        """Write wiki knowledge base to context.md.
+    def write_wiki(
+        self,
+        wiki: WikiKnowledge,
+        context_dir: Path,
+    ) -> Path:
+        """Write wiki sections to context.md: Decisions, Patterns, Recent Work.
 
-        Section headers maintain exact format `## Section Name` for reliable
-        regex parsing. WikiKnowledge sections never None (empty lists) ensures
-        no null checks needed.
+        Architecture content lives in architecture.md (ref: DL-009).
+        Issues and Key Symbols fields are absent from WikiKnowledge — these sections
+        accumulate stale data without ongoing value (ref: DL-003).
+        Section headers use exact `## Section Name` format for reliable regex parsing
+        in wiki_parser.py. WikiKnowledge section fields are always lists (never None),
+        eliminating null checks.
 
         Args:
             wiki: WikiKnowledge to write
@@ -168,42 +175,18 @@ class MarkdownWriter:
 
         parts = ["# Project Context\n"]
 
-        # Architecture section (text block, not list)
-        parts.append("## Architecture\n")
-        if wiki.architecture:
-            parts.append(f"{wiki.architecture}\n")
-        else:
-            parts.append("_No architectural notes yet._\n")
-
-        # Decisions section (list)
-        parts.append("\n## Decisions\n")
+        parts.append("## Decisions\n")
         if wiki.decisions:
             parts.append('\n'.join(f"- {d}" for d in wiki.decisions) + '\n')
         else:
             parts.append("_No decisions recorded yet._\n")
 
-        # Patterns section (list)
         parts.append("\n## Patterns\n")
         if wiki.patterns:
             parts.append('\n'.join(f"- {p}" for p in wiki.patterns) + '\n')
         else:
             parts.append("_No patterns identified yet._\n")
 
-        # Key Symbols section (list)
-        parts.append("\n## Key Symbols\n")
-        if wiki.key_symbols:
-            parts.append('\n'.join(f"- {k}" for k in wiki.key_symbols) + '\n')
-        else:
-            parts.append("_No key symbols identified yet._\n")
-
-        # Issues section (list)
-        parts.append("\n## Issues\n")
-        if wiki.issues:
-            parts.append('\n'.join(f"- {i}" for i in wiki.issues) + '\n')
-        else:
-            parts.append("_No issues tracked yet._\n")
-
-        # Recent Work section (list)
         parts.append("\n## Recent Work\n")
         if wiki.recent_work:
             parts.append('\n'.join(f"- {w}" for w in wiki.recent_work) + '\n')
@@ -212,44 +195,3 @@ class MarkdownWriter:
 
         wiki_file.write_text('\n'.join(parts))
         return wiki_file
-
-    def write_session_log(
-        self,
-        context_dir: Path,
-        topics: List[str],
-        changes: List[FileChange],
-        reasoning: str,
-        context: Optional[SessionContext] = None,
-    ) -> Path:
-        """Write immutable session log to history directory.
-
-        Args:
-            context_dir: Directory containing context.md
-            topics: List of topics
-            changes: List of changes
-            reasoning: Reasoning
-            context: Rich context
-
-        Returns:
-            Path to session log file
-        """
-        history_dir = context_dir / "history"
-
-        ensure_directory(history_dir)
-
-        # Fallback topics
-        if not topics:
-            topics = ["general"]
-
-        # Create filename: YYYY-MM-DD_HH-MM_topic.md
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d_%H-%M")
-        topic_slug = topics[0].lower().replace(" ", "-")
-        filename = f"{date_str}_{topic_slug}.md"
-
-        log_file = history_dir / filename
-
-        entry = self._format_session_entry(topics, changes, reasoning, context)
-        log_file.write_text(entry)
-
-        return log_file

@@ -15,16 +15,17 @@ logger = get_logger(__name__)
 
 @dataclass
 class WikiKnowledge:
-    """Structured wiki knowledge base.
+    """Parsed content of a context.md wiki file.
 
-    Provides type-safe contract between parser and merger (IDE autocomplete, clear interface).
-    All section fields use empty lists (never None) to simplify merge logic.
+    Covers 3 active sections: Decisions, Patterns, Recent Work.
+    Architecture is parsed for backward-compat reads of existing context.md files that
+    contain an Architecture section; write_wiki does not emit it (ref: DL-009).
+    Issues and Key Symbols fields are absent — these sections accumulate stale data (ref: DL-003).
+    All list fields default to empty list (never None) to eliminate null checks in merger.
     """
     architecture: str = ""
     decisions: List[str] = field(default_factory=list)
     patterns: List[str] = field(default_factory=list)
-    key_symbols: List[str] = field(default_factory=list)
-    issues: List[str] = field(default_factory=list)
     recent_work: List[str] = field(default_factory=list)
 
 
@@ -32,7 +33,7 @@ def parse(content: str) -> WikiKnowledge:
     """Parse wiki markdown into WikiKnowledge.
 
     Regex pattern `## SectionName` is reliable for wiki format; full markdown
-    parser (mistune, markdown-it) would be overkill for 5 known sections.
+    parser (mistune, markdown-it) would be overkill for 3 known sections.
 
     Args:
         content: Markdown content with ## Section headers
@@ -56,8 +57,6 @@ def parse(content: str) -> WikiKnowledge:
         # Extract list sections
         wiki.decisions = _extract_list_items(content, 'Decisions')
         wiki.patterns = _extract_list_items(content, 'Patterns')
-        wiki.key_symbols = _extract_list_items(content, 'Key Symbols')
-        wiki.issues = _extract_list_items(content, 'Issues')
         wiki.recent_work = _extract_list_items(content, 'Recent Work')
 
         return wiki
@@ -96,24 +95,26 @@ def _extract_list_items(content: str, section_name: str) -> List[str]:
 
 
 def has_empty_sections(wiki: WikiKnowledge) -> bool:
-    """Check if wiki has empty Architecture, Patterns, or Key Symbols sections.
+    """Returns True when architecture or patterns is empty or contains only placeholder text.
 
-    Returns True when any enrichable section contains only placeholder text
-    or is empty. Enables short-circuit enrichment: skip LLM calls if all
-    sections are already user-populated.
+    Guards LLM enrichment calls: returns True signals that enrichment is needed.
+    Checks architecture for backward-compat: existing context.md files written before DL-009
+    may contain Architecture sections that are placeholder-only (ref: DL-009).
+    Checks patterns only from active sections; decisions and recent_work are always
+    populated by LLM skill output (ref: DL-003).
 
     Args:
-        wiki: WikiKnowledge instance to check
+        wiki: Parsed WikiKnowledge instance
 
     Returns:
-        True if any of Architecture, Patterns, or Key Symbols is empty
+        True if architecture or patterns is missing or placeholder-only
     """
     placeholder_pattern = r'_No .* yet\._'
 
     if not wiki.architecture or re.search(placeholder_pattern, wiki.architecture):
         return True
 
-    if not wiki.patterns or not wiki.key_symbols:
+    if not wiki.patterns:
         return True
 
     return False

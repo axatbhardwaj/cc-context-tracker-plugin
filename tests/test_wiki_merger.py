@@ -70,7 +70,6 @@ class TestMergeSession:
         """Error: Empty session produces unchanged wiki."""
         wiki = WikiKnowledge(
             decisions=["Existing decision"],
-            issues=["Existing issue"],
             recent_work=["[2024-01-01] Session 1"]
         )
         session = SessionContext(
@@ -82,7 +81,6 @@ class TestMergeSession:
         result = merge_session(wiki, session)
 
         assert result.decisions == ["Existing decision"]
-        assert result.issues == ["Existing issue"]
         assert result.recent_work == ["[2024-01-01] Session 1"]
 
 

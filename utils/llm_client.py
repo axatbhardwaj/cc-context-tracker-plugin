@@ -31,12 +31,15 @@ class LLMClient:
         self._claude_path = shutil.which("claude")
         self._gemini_path = shutil.which("gemini")
 
-    def generate(self, prompt: str, max_tokens: int = None) -> str:
+    def generate(self, prompt: str, max_tokens: int = None, model: str = None,
+                 agent: str = None) -> str:
         """Generate text using configured provider.
 
         Args:
             prompt: Input prompt
             max_tokens: Maximum tokens (not directly used by CLI)
+            model: Override model for this call only (e.g. "opus", "sonnet")
+            agent: Agent name from ~/.claude/agents/ (e.g. "architect", "technical-writer")
 
         Returns:
             Generated text
@@ -44,16 +47,19 @@ class LLMClient:
         if self.provider == "gemini":
             return self._generate_gemini(prompt)
 
-        return self._generate_claude(prompt)
+        return self._generate_claude(prompt, model=model, agent=agent)
 
-    def _generate_claude(self, prompt: str) -> str:
+    def _generate_claude(self, prompt: str, model: str = None, agent: str = None) -> str:
         """Generate using Claude CLI."""
         if not self._claude_path:
             logger.warning("claude CLI not found in PATH")
             return self._fallback_response(prompt)
 
+        effective_model = model or self.model
         try:
-            cmd = [self._claude_path, "--print", "--model", self.model]
+            cmd = [self._claude_path, "--print", "--model", effective_model]
+            if agent:
+                cmd.extend(["--agent", agent])
 
             # Pass prompt via stdin to avoid shell argument length limits
             result = subprocess.run(

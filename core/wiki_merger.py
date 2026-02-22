@@ -37,11 +37,6 @@ def merge_session(
         existing=wiki.decisions, new_items=session.decisions_made, threshold=0.8
     )
 
-    # Add problems to Issues section (deduplicated to prevent duplicate fixes)
-    wiki.issues = _deduplicate(
-        existing=wiki.issues, new_items=session.problems_solved, threshold=0.8
-    )
-
     # Rotate recent work to keep only last 5 sessions (6th drops oldest)
     if session.summary:
         date_str = datetime.now().strftime("%Y-%m-%d")
