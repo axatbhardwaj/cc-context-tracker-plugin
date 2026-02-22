@@ -448,6 +448,120 @@ Output the complete architecture.md content between <architecture_md> tags."""
         logger.warning(f"Architecture generation failed: {e}")
 
 
+def _revert_files(backups: dict):
+    """Restore files from backup after failed quality review.
+
+    For each path in backups:
+    - If backup content is not None, write it back (restore previous version)
+    - If backup content is None, the file was new — delete it
+
+    Args:
+        backups: Dict mapping file path strings to their backup content (str or None)
+    """
+    for file_path, content in backups.items():
+        path = Path(file_path)
+        if content is not None:
+            path.write_text(content)
+            logger.info(f"Reverted: {file_path}")
+        else:
+            if path.exists():
+                path.unlink()
+                logger.info(f"Removed new file: {file_path}")
+
+
+def review_generated_files(
+    context_path: str,
+    arch_path: str,
+    old_context: str,
+    old_arch: str,
+    config: dict,
+) -> dict:
+    """Review generated context.md and architecture.md via quality-reviewer agent.
+
+    Graceful degradation: returns PASS verdict on any failure (missing skill,
+    LLM error, unparseable response) so the hook is never blocked.
+
+    Args:
+        context_path: Path to the new context.md
+        arch_path: Path to the new architecture.md
+        old_context: Previous context.md content (empty string if new file)
+        old_arch: Previous architecture.md content (empty string if new file)
+        config: Plugin configuration
+
+    Returns:
+        Dict with 'verdict' (str) and 'findings' (str) keys
+    """
+    from utils.llm_client import LLMClient
+
+    default_pass = {"verdict": "PASS", "findings": ""}
+
+    skill_prompt = load_skill_prompt('reviewer-agent')
+    if not skill_prompt:
+        logger.warning("reviewer-agent skill not found, defaulting to PASS")
+        return default_pass
+
+    new_context = ""
+    if Path(context_path).exists():
+        new_context = Path(context_path).read_text()
+
+    new_arch = ""
+    if Path(arch_path).exists():
+        new_arch = Path(arch_path).read_text()
+
+    prompt = f"""{skill_prompt}
+
+## Files to Review
+
+### New context.md:
+```markdown
+{new_context if new_context else '(empty)'}
+```
+
+### Old context.md:
+```markdown
+{old_context if old_context else '(no previous version)'}
+```
+
+### New architecture.md:
+```markdown
+{new_arch if new_arch else '(empty)'}
+```
+
+### Old architecture.md:
+```markdown
+{old_arch if old_arch else '(no previous version)'}
+```
+
+Review these files and output your verdict."""
+
+    try:
+        llm = LLMClient(config)
+        response = llm.generate(prompt, agent="quality-reviewer")
+
+        verdict_match = re.search(
+            r'<review_verdict>(.*?)</review_verdict>',
+            response,
+            re.DOTALL
+        )
+
+        if verdict_match:
+            verdict_text = verdict_match.group(1).strip()
+            # Extract just the verdict keyword (e.g., "PASS" from "VERDICT: PASS")
+            keyword_match = re.search(
+                r'VERDICT:\s*(PASS_WITH_CONCERNS|PASS|NEEDS_CHANGES|MUST_ISSUES)',
+                verdict_text
+            )
+            verdict = keyword_match.group(1) if keyword_match else "PASS"
+            return {"verdict": verdict, "findings": response}
+
+        logger.warning("No review_verdict tags in response, defaulting to PASS")
+        return default_pass
+
+    except Exception as e:
+        logger.warning(f"Quality review failed: {e}, defaulting to PASS")
+        return default_pass
+
+
 COOLDOWN_FILE = Path('/tmp/context-tracker-cooldowns.json')
 COOLDOWN_HOURS = 2
 
@@ -585,6 +699,11 @@ def main():
             print(json.dumps({}), file=sys.stdout)
             sys.exit(0)
 
+        # Snapshot existing files before generation for quality review
+        arch_path = context_path.parent / "architecture.md"
+        old_context = Path(context_path).read_text() if Path(context_path).exists() else None
+        old_arch = arch_path.read_text() if arch_path.exists() else None
+
         # Use skill-based analysis to update context.md
         logger.info("Extracting session context...")
         session_ctx = analyzer.extract_session_context(changes, all_topics)
@@ -608,6 +727,26 @@ def main():
 
         # Architect agent: update architecture.md (opus)
         generate_architecture(context_path, cwd, config)
+
+        # Quality review gate: validate generated files before commit
+        logger.info("Running quality review...")
+        review = review_generated_files(
+            str(context_path),
+            str(arch_path),
+            old_context or "",
+            old_arch or "",
+            config,
+        )
+        logger.info(f"Quality review verdict: {review['verdict']}")
+
+        if review['verdict'] in ('NEEDS_CHANGES', 'MUST_ISSUES'):
+            logger.warning(f"Quality review failed ({review['verdict']}), reverting files")
+            backups = {str(context_path): old_context}
+            # Keep newly-created architecture.md — having one is better than none
+            if old_arch is not None:
+                backups[str(arch_path)] = old_arch
+            _revert_files(backups)
+            logger.info("Reverted to pre-generation state")
 
         # Root context captures cross-cutting decisions for monorepos
         if len(context_paths) > 1:

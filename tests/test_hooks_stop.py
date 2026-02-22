@@ -8,6 +8,8 @@ import pytest
 from hooks.stop import confirm_execution
 from hooks.stop import update_context_wiki
 from hooks.stop import generate_architecture
+from hooks.stop import review_generated_files
+from hooks.stop import _revert_files
 
 
 def test_confirm_execution_yes(monkeypatch, capsys):
@@ -291,3 +293,118 @@ def test_generate_architecture_no_tags(
 
     arch_file = tmp_path / "architecture.md"
     assert not arch_file.exists()
+
+
+# --- Quality review gate tests ---
+
+
+@patch("utils.llm_client.LLMClient")
+@patch("hooks.stop.load_skill_prompt")
+def test_review_generated_files_pass(mock_load_skill, mock_llm_class, tmp_path):
+    """Quality reviewer returns PASS verdict and uses quality-reviewer agent."""
+    mock_load_skill.return_value = "reviewer skill prompt"
+
+    mock_llm = mock_llm_class.return_value
+    mock_llm.generate.return_value = (
+        "All checks passed.\n\n<review_verdict>VERDICT: PASS</review_verdict>"
+    )
+
+    context_file = tmp_path / "context.md"
+    context_file.write_text("# Project Context\n\n## Decisions\n- D1")
+    arch_file = tmp_path / "architecture.md"
+    arch_file.write_text("Plugin overview.")
+
+    result = review_generated_files(
+        str(context_file), str(arch_file), "", "", {}
+    )
+
+    assert result["verdict"] == "PASS"
+    assert "All checks passed" in result["findings"]
+    mock_load_skill.assert_called_once_with("reviewer-agent")
+
+    # Verify quality-reviewer agent is used
+    _, kwargs = mock_llm.generate.call_args
+    assert kwargs["agent"] == "quality-reviewer"
+
+
+@patch("utils.llm_client.LLMClient")
+@patch("hooks.stop.load_skill_prompt")
+def test_review_generated_files_needs_changes(mock_load_skill, mock_llm_class, tmp_path):
+    """Quality reviewer returns NEEDS_CHANGES verdict."""
+    mock_load_skill.return_value = "reviewer skill prompt"
+
+    mock_llm = mock_llm_class.return_value
+    mock_llm.generate.return_value = (
+        "Missing Patterns section.\n\n"
+        "<review_verdict>VERDICT: NEEDS_CHANGES</review_verdict>"
+    )
+
+    context_file = tmp_path / "context.md"
+    context_file.write_text("# Project Context\n\n## Decisions\n- D1")
+    arch_file = tmp_path / "architecture.md"
+    arch_file.write_text("Overview.")
+
+    result = review_generated_files(
+        str(context_file), str(arch_file), "", "", {}
+    )
+
+    assert result["verdict"] == "NEEDS_CHANGES"
+
+
+@patch("hooks.stop.load_skill_prompt")
+def test_review_generated_files_missing_skill(mock_load_skill, tmp_path):
+    """Quality reviewer defaults to PASS when skill prompt is missing."""
+    mock_load_skill.return_value = ""
+
+    result = review_generated_files(
+        str(tmp_path / "context.md"), str(tmp_path / "arch.md"), "", "", {}
+    )
+
+    assert result["verdict"] == "PASS"
+
+
+@patch("utils.llm_client.LLMClient")
+@patch("hooks.stop.load_skill_prompt")
+def test_review_generated_files_llm_failure(mock_load_skill, mock_llm_class, tmp_path):
+    """Quality reviewer defaults to PASS when LLM raises an exception."""
+    mock_load_skill.return_value = "reviewer skill prompt"
+
+    mock_llm = mock_llm_class.return_value
+    mock_llm.generate.side_effect = RuntimeError("LLM timeout")
+
+    result = review_generated_files(
+        str(tmp_path / "context.md"), str(tmp_path / "arch.md"), "", "", {}
+    )
+
+    assert result["verdict"] == "PASS"
+
+
+def test_revert_files(tmp_path):
+    """_revert_files restores backup content to existing files."""
+    context_file = tmp_path / "context.md"
+    arch_file = tmp_path / "architecture.md"
+
+    # Write "new" (bad) content
+    context_file.write_text("bad context")
+    arch_file.write_text("bad arch")
+
+    # Revert to backup
+    backups = {
+        str(context_file): "# Project Context\n\n## Decisions\n- Good",
+        str(arch_file): "Original architecture.",
+    }
+    _revert_files(backups)
+
+    assert context_file.read_text() == "# Project Context\n\n## Decisions\n- Good"
+    assert arch_file.read_text() == "Original architecture."
+
+
+def test_revert_files_removes_new(tmp_path):
+    """_revert_files deletes file when backup is None (file was newly created)."""
+    new_file = tmp_path / "context.md"
+    new_file.write_text("should be deleted")
+
+    backups = {str(new_file): None}
+    _revert_files(backups)
+
+    assert not new_file.exists()
